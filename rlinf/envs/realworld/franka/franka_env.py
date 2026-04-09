@@ -89,6 +89,8 @@ class FrankaRobotConfig:
     success_hold_steps: int = (
         1  # Default to 1 to maintain backward compatibility (immediate success)
     )
+    # Target pose controller (optional)
+    use_target_controller: bool = False
 
     def __post_init__(self):
         """Convert list fields from YAML/Hydra to numpy arrays."""
@@ -139,6 +141,8 @@ class FrankaEnv(gym.Env):
         next(self._joint_reset_cycle)  # Initialize the cycle
 
         self._success_hold_counter = 0  # Initialize the success hold counter
+
+        self._target_pose = None  # Target pose for target-controller mode
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -237,21 +241,47 @@ class FrankaEnv(gym.Env):
         action = np.clip(action, self.action_space.low, self.action_space.high)
         xyz_delta = action[:3]
 
-        self.next_position = self._franka_state.tcp_pose.copy()
-        self.next_position[:3] = (
-            self.next_position[:3] + xyz_delta * self.config.action_scale[0]
-        )
+        use_target = getattr(self.config, "use_target_controller", False)
+
+        if use_target:
+            if self._target_pose is None:
+                self._target_pose = self._franka_state.tcp_pose.copy()
+
+            # update target pose
+            self._target_pose[:3] = (
+                self._target_pose[:3] + xyz_delta * self.config.action_scale[0]
+            )
+
+            self.next_position = self._target_pose.copy()
+
+        else:
+            # original behavior
+            self.next_position = self._franka_state.tcp_pose.copy()
+            self.next_position[:3] = (
+                self.next_position[:3] + xyz_delta * self.config.action_scale[0]
+            )
 
         if not self.config.is_dummy:
+            if use_target:
+                base_quat = self._target_pose[3:]
+            else:
+                base_quat = self._franka_state.tcp_pose[3:]
+
             self.next_position[3:] = (
                 R.from_euler("xyz", action[3:6] * self.config.action_scale[1])
-                * R.from_quat(self._franka_state.tcp_pose[3:].copy())
+                * R.from_quat(base_quat.copy())
             ).as_quat()
+
+            if use_target:
+                self._target_pose[3:] = self.next_position[3:]
 
             gripper_action = action[6] * self.config.action_scale[2]
             is_gripper_action_effective = self._gripper_action(gripper_action)
 
             clipped_position = self._clip_position_to_safety_box(self.next_position)
+            
+            if use_target:
+                self._target_pose = clipped_position.copy()
 
             self._move_action(clipped_position)
         else:
@@ -368,6 +398,9 @@ class FrankaEnv(gym.Env):
         self._num_steps = 0
         self._franka_state = self._controller.get_state().wait()[0]
         observation = self._get_observation()
+
+        if getattr(self.config, "use_target_controller", False):
+            self._target_pose = self._franka_state.tcp_pose.copy()
 
         return observation, {}
 
