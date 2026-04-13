@@ -530,6 +530,7 @@ class FrankaEnv(gym.Env):
                         "gripper_position": gym.spaces.Box(-1, 1, shape=(1,)),
                         "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
                         "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                        "arm_joint_position": gym.spaces.Box(-np.inf, np.inf, shape=(7,)),
                     }
                 ),
                 "frames": gym.spaces.Dict(
@@ -695,6 +696,7 @@ class FrankaEnv(gym.Env):
                 ),
                 "tcp_force": self._franka_state.tcp_force,
                 "tcp_torque": self._franka_state.tcp_torque,
+                "arm_joint_position": self._franka_state.arm_joint_position,
             }
             observation = {
                 "state": state,

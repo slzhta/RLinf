@@ -19,7 +19,7 @@ class FrankaCoTrainingBaseConfig(FrankaRobotConfig):
     random_xy_range: float = 0.01  # for randomization
     clip_x_range: float = 0.2  # for bounding box
     clip_y_range: float = 0.3  # for bounding box
-    clip_z_range_high: float = 0.1
+    clip_z_range_high: float = 0.3
     clip_z_range_low: float = 0.001
     random_rz_range: float = np.pi / 9  # for random reset
     clip_rz_range: float = np.pi / 5  # for bounding box
@@ -74,16 +74,16 @@ class FrankaCoTrainingBaseConfig(FrankaRobotConfig):
         }
         self.target_ee_pose = np.array(self.target_ee_pose)
         self.reset_ee_pose = self.target_ee_pose + np.array(
-            [0.0, 0.0, self.clip_z_range_high, 0.0, 0.0, 0.0]
+            [0.0, 0.0, (self.clip_z_range_high + self.clip_z_range_low) / 2, 0.0, 0.0, 0.0]
         )
         self.reward_threshold = np.array(self.reward_threshold)
-        self.action_scale = np.array([0.03, 0.1, 1])
+        self.action_scale = np.array([0.01, 0.05, 1])
         self.ee_pose_limit_min = np.array(
             [
                 self.target_ee_pose[0] - self.clip_x_range,
                 self.target_ee_pose[1] - self.clip_y_range,
                 self.target_ee_pose[2] - self.clip_z_range_low,
-                self.target_ee_pose[3] - self.clip_rp_range
+                self.target_ee_pose[3] - self.clip_rp_range,
                 self.target_ee_pose[4] - self.clip_rp_range,
                 self.target_ee_pose[5] - self.clip_rz_range,
             ]
