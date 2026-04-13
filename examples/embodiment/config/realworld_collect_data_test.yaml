@@ -1,7 +1,7 @@
 # Note: This is a yaml file only for testing
 # It should be delete when ready to submit a pull request
 defaults:
-  - env/realworld_bin_relocation@env.eval
+  - env/realworld_co_training_base@env.eval
   - override hydra/job_logging: stdout
 
 hydra:
@@ -43,18 +43,12 @@ env:
     auto_reset: False
     use_spacemouse: True
     max_episode_steps: 200000000
+    no_gripper: False
     override_cfg:
       camera_serials: ["141722075170","233622072915", ]
       target_ee_pose: [ 0.68890358,  0.10072748, -0.04299118,  3.05971374, -0.08385753 ,-0.038867  ]
       success_hold_steps: 1  # define how many consecutive steps the robot must hold the position to succeed
       max_num_steps: 200000000
-      random_xy_range: 0.01
-      random_rz_range: 0.01
-      clip_x_range: 0.3
-      clip_y_range: 0.3
-      clip_z_range_low: 0.006
-      clip_z_range_high: 0.15
-      clip_rz_range: 0.5
 
   data_collection:
     enabled: True
