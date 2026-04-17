@@ -1,0 +1,17 @@
+domain_randomization:
+  enabled: false
+
+  randomize_lighting: false
+
+  randomize_joint_control: false
+  randomize_joint_stiffness: false
+  randomize_joint_damping: false
+  randomize_joint_force_limit: false
+  randomize_joint_friction: false
+  randomize_joint_drive_mode: false
+
+  joint_stiffness_scale_range: [0.7, 1.3]
+  joint_damping_scale_range: [0.7, 1.3]
+  joint_force_limit_scale_range: [0.8, 1.2]
+  joint_friction_abs_range: [0.0, 0.3]
+  joint_drive_mode_choices: ["force", "acceleration"]
