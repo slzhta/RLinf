@@ -35,3 +35,32 @@ init_params:
   render_mode: rgb_array
   reward_mode: normalized_dense
   use_sparse_reward: true
+
+  # DR config is defined inline here (single supported input mode).
+  domain_randomization:
+    enabled: false
+    randomize_lighting: false
+    randomize_joint_control: false
+    randomize_joint_stiffness: false
+    randomize_joint_damping: false
+    randomize_joint_force_limit: false
+    randomize_joint_friction: false
+    randomize_joint_drive_mode: false
+    joint_stiffness_scale_range: [0.7, 1.3]
+    joint_damping_scale_range: [0.7, 1.3]
+    joint_force_limit_scale_range: [0.8, 1.2]
+    joint_friction_abs_range: [0.0, 0.3]
+    joint_drive_mode_choices: ["force", "acceleration"]
+
+  # Controller alignment is also configured inline via env params.
+  controller_alignment:
+    use_target_controller: false
+    use_zero_one_gripper_action: false
+    target_ee_pose: [0.5, 0.0, 0.1, -3.14, 0.0, 0.0]
+    action_scale: [0.1, 0.1, 1.0]
+    ee_pose_limit_min: [0.15, -0.45, 0.0, -3.1415927, -3.1415927, -3.1415927]
+    ee_pose_limit_max: [0.85, 0.45, 0.6, 3.1415927, 3.1415927, 3.1415927]
+    binary_gripper_action: true
+    binary_gripper_threshold: 0.5
+    open_command: 1.0
+    close_command: -1.0

@@ -1,5 +1,5 @@
 import os
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Sequence
 
 import cv2
 import numpy as np
@@ -29,6 +29,24 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     SUPPORTED_ROBOTS = ["panda_umi"]
     CAMERA_NAMES = ("3rdview_camera", "hand_camera")
+    DR_BOOL_KEYS = (
+        "randomize_lighting",
+        "randomize_joint_control",
+        "randomize_joint_stiffness",
+        "randomize_joint_damping",
+        "randomize_joint_force_limit",
+        "randomize_joint_friction",
+        "randomize_joint_drive_mode",
+    )
+    DR_RANGE_DEFAULTS: dict[str, tuple[float, float]] = {
+        "joint_stiffness_scale_range": (0.7, 1.3),
+        "joint_damping_scale_range": (0.7, 1.3),
+        "joint_force_limit_scale_range": (0.8, 1.2),
+        "joint_friction_abs_range": (0.0, 0.3),
+    }
+    DR_CHOICE_DEFAULTS: dict[str, tuple[str, ...]] = {
+        "joint_drive_mode_choices": ("force", "acceleration"),
+    }
     agent: PandaUMI
 
     def __init__(
@@ -37,6 +55,20 @@ class DigitalTwinBaseEnv(BaseEnv):
         robot_uids="panda_umi",
         robot_init_qpos_noise=0.02,
         overwrite_rgb_in_obs: bool = True,
+        controller_alignment: dict[str, Any] | None = None,
+        domain_randomization: bool | dict[str, Any] | None = None,
+        randomize_lighting: bool | None = None,
+        randomize_joint_control: bool | None = None,
+        randomize_joint_stiffness: bool | None = None,
+        randomize_joint_damping: bool | None = None,
+        randomize_joint_force_limit: bool | None = None,
+        randomize_joint_friction: bool | None = None,
+        randomize_joint_drive_mode: bool | None = None,
+        joint_stiffness_scale_range: Sequence[float] | None = None,
+        joint_damping_scale_range: Sequence[float] | None = None,
+        joint_force_limit_scale_range: Sequence[float] | None = None,
+        joint_friction_abs_range: Sequence[float] | None = None,
+        joint_drive_mode_choices: Sequence[str] | None = None,
         **kwargs,
     ):
         if robot_uids != "panda_umi":
@@ -46,6 +78,97 @@ class DigitalTwinBaseEnv(BaseEnv):
 
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.overwrite_rgb_in_obs = overwrite_rgb_in_obs
+        self.controller_alignment = self._normalize_controller_alignment_arg(
+            controller_alignment
+        )
+
+        domain_randomization_flag, domain_randomization_inline = (
+            self._normalize_domain_randomization_arg(domain_randomization)
+        )
+
+        dr_cfg = (
+            domain_randomization_inline
+            if domain_randomization_inline is not None
+            else {}
+        )
+
+        cfg_master_toggle = self._infer_master_domain_randomization_toggle(dr_cfg)
+
+        # Priority for each DR field: explicit env arg > inline mapping > existing/default.
+        self.domain_randomization = self._resolve_bool_attr(
+            name="domain_randomization",
+            explicit_value=(
+                domain_randomization_flag
+                if domain_randomization_flag is not None
+                else cfg_master_toggle
+            ),
+            default=False,
+        )
+
+        bool_overrides = {
+            "randomize_lighting": randomize_lighting,
+            "randomize_joint_control": randomize_joint_control,
+            "randomize_joint_stiffness": randomize_joint_stiffness,
+            "randomize_joint_damping": randomize_joint_damping,
+            "randomize_joint_force_limit": randomize_joint_force_limit,
+            "randomize_joint_friction": randomize_joint_friction,
+            "randomize_joint_drive_mode": randomize_joint_drive_mode,
+        }
+        for key in self.DR_BOOL_KEYS:
+            explicit_value = bool_overrides[key]
+            resolved_input = explicit_value if explicit_value is not None else dr_cfg.get(key)
+            setattr(
+                self,
+                key,
+                self._resolve_bool_attr(
+                    name=key,
+                    explicit_value=resolved_input,
+                    default=False,
+                ),
+            )
+
+        range_overrides = {
+            "joint_stiffness_scale_range": joint_stiffness_scale_range,
+            "joint_damping_scale_range": joint_damping_scale_range,
+            "joint_force_limit_scale_range": joint_force_limit_scale_range,
+            "joint_friction_abs_range": joint_friction_abs_range,
+        }
+        for key, default_range in self.DR_RANGE_DEFAULTS.items():
+            explicit_value = range_overrides[key]
+            resolved_input = explicit_value if explicit_value is not None else dr_cfg.get(key)
+            setattr(
+                self,
+                key,
+                self._resolve_range_attr(
+                    name=key,
+                    explicit_value=resolved_input,
+                    default=default_range,
+                ),
+            )
+
+        choice_overrides = {
+            "joint_drive_mode_choices": joint_drive_mode_choices,
+        }
+        for key, default_choices in self.DR_CHOICE_DEFAULTS.items():
+            explicit_value = choice_overrides[key]
+            resolved_input = explicit_value if explicit_value is not None else dr_cfg.get(key)
+            setattr(
+                self,
+                key,
+                self._resolve_choices_attr(
+                    name=key,
+                    explicit_value=resolved_input,
+                    default=default_choices,
+                ),
+            )
+
+        if not hasattr(self, "_joint_drive_defaults"):
+            self._joint_drive_defaults: dict[
+                str, list[tuple[float, float, float, str, float]]
+            ] = {}
+        if not hasattr(self, "_parallel_randomization_info"):
+            self._parallel_randomization_info: list[dict[str, Any]] = []
+
         self._background_images_np = self._load_background_images()
         self._background_images: dict[str, torch.Tensor] = {}
         self._robot_segmentation_ids: torch.Tensor | None = None
@@ -120,18 +243,127 @@ class DigitalTwinBaseEnv(BaseEnv):
         )
 
     def _load_lighting(self, options: dict):
-        shadow = self.enable_shadow
-        
-        self.scene.set_ambient_light([0.05, 0.05, 0.25])
+        if not self._is_enabled(self.randomize_lighting):
+            shadow = self.enable_shadow
+            self.scene.set_ambient_light([0.05, 0.05, 0.25])
+            self.scene.add_directional_light(
+                [1, -0.2, -0.2],
+                [1.0, 1.0, 1.0],
+                shadow=shadow,
+                shadow_scale=5,
+                shadow_map_size=2048,
+            )
+            self.scene.add_directional_light(
+                [0, 1, -1],
+                [1.8, 1.8, 1.8],
+                shadow=shadow,
+                shadow_scale=5,
+                shadow_map_size=2048,
+            )
+            return
+
+        self.scene.set_ambient_light([0.08, 0.08, 0.08])
         self.scene.add_directional_light(
-            [1, -0.2, -0.2], [1.0, 1.0, 1.0], shadow=shadow, shadow_scale=5, shadow_map_size=2048
-        )
-        self.scene.add_directional_light(
-            [0, 1, -1], [1.8, 1.8, 1.8], shadow=shadow, shadow_scale=5, shadow_map_size=2048
+            [0.0, 0.0, -1.0],
+            [0.25, 0.25, 0.25],
+            shadow=False,
         )
 
+        for scene_idx in range(self.num_envs):
+            rng = self._batched_episode_rng[scene_idx]
+
+            spot_position = np.array(
+                [
+                    rng.uniform(-0.45, 0.45),
+                    rng.uniform(-0.45, 0.45),
+                    rng.uniform(0.55, 1.25),
+                ],
+                dtype=np.float32,
+            )
+            spot_direction = np.array(
+                [
+                    rng.uniform(-0.5, 0.5),
+                    rng.uniform(-0.5, 0.5),
+                    rng.uniform(-1.0, -0.2),
+                ],
+                dtype=np.float32,
+            )
+            spot_direction = spot_direction / (np.linalg.norm(spot_direction) + 1e-6)
+            spot_color = rng.uniform(0.6, 2.4, size=(3,)).tolist()
+            inner_fov = np.deg2rad(float(rng.uniform(18.0, 30.0)))
+            outer_fov = np.deg2rad(float(rng.uniform(38.0, 68.0)))
+
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.spot.position",
+                [float(v) for v in spot_position.tolist()],
+            )
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.spot.direction",
+                [float(v) for v in spot_direction.tolist()],
+            )
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.spot.color",
+                [float(v) for v in spot_color],
+            )
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.spot.inner_fov_deg",
+                float(np.rad2deg(inner_fov)),
+            )
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.spot.outer_fov_deg",
+                float(np.rad2deg(outer_fov)),
+            )
+
+            self.scene.add_spot_light(
+                position=spot_position,
+                direction=spot_direction,
+                inner_fov=inner_fov,
+                outer_fov=outer_fov,
+                color=spot_color,
+                shadow=self.enable_shadow,
+                shadow_map_size=1024,
+                scene_idxs=[scene_idx],
+            )
+
+            fill_position = np.array(
+                [
+                    rng.uniform(-0.6, 0.6),
+                    rng.uniform(-0.6, 0.6),
+                    rng.uniform(0.4, 0.9),
+                ],
+                dtype=np.float32,
+            )
+            fill_color = rng.uniform(0.15, 0.9, size=(3,)).tolist()
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.fill.position",
+                [float(v) for v in fill_position.tolist()],
+            )
+            self._set_randomization_value(
+                scene_idx,
+                "lighting.fill.color",
+                [float(v) for v in fill_color],
+            )
+            self.scene.add_point_light(
+                position=fill_position,
+                color=fill_color,
+                shadow=False,
+                scene_idxs=[scene_idx],
+            )
+
     def _load_agent(self, options: dict):
-        super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
+        self.agent = PandaUMI(
+            self.scene,
+            self._control_freq,
+            self._control_mode,
+            initial_pose=sapien.Pose(p=[-0.615, 0, 0]),
+            controller_alignment=self.controller_alignment,
+        )
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(
@@ -140,6 +372,209 @@ class DigitalTwinBaseEnv(BaseEnv):
         )
         self.table_scene.build()
         self._load_task_scene(options)
+
+    def _normalize_domain_randomization_arg(
+        self,
+        domain_randomization: bool | dict[str, Any] | None,
+    ) -> tuple[bool | None, dict[str, Any] | None]:
+        if domain_randomization is None:
+            return None, None
+        if isinstance(domain_randomization, bool):
+            return domain_randomization, None
+        if isinstance(domain_randomization, dict):
+            return None, dict(domain_randomization)
+        raise TypeError(
+            "domain_randomization must be bool or a mapping of randomization settings"
+        )
+
+    def _normalize_controller_alignment_arg(
+        self,
+        controller_alignment: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if controller_alignment is None:
+            return {}
+        if not isinstance(controller_alignment, dict):
+            raise TypeError(
+                "controller_alignment must be a mapping of controller settings"
+            )
+        return dict(controller_alignment)
+
+    def _infer_master_domain_randomization_toggle(
+        self, config: dict[str, Any]
+    ) -> bool | None:
+        if "enabled" in config:
+            return self._resolve_bool_attr(
+                name="enabled", explicit_value=config["enabled"], default=False
+            )
+        if "domain_randomization" in config:
+            return self._resolve_bool_attr(
+                name="domain_randomization",
+                explicit_value=config["domain_randomization"],
+                default=False,
+            )
+
+        if "randomize_lighting" in config or "randomize_joint_control" in config:
+            randomize_lighting = self._resolve_bool_attr(
+                name="randomize_lighting",
+                explicit_value=config.get("randomize_lighting", False),
+                default=False,
+            )
+            randomize_joint_control = self._resolve_bool_attr(
+                name="randomize_joint_control",
+                explicit_value=config.get("randomize_joint_control", False),
+                default=False,
+            )
+            return bool(randomize_lighting or randomize_joint_control)
+
+        return None
+
+    def _resolve_bool_attr(
+        self,
+        name: str,
+        explicit_value: bool | None,
+        default: bool,
+    ) -> bool:
+        if explicit_value is not None:
+            if not isinstance(explicit_value, bool):
+                raise TypeError(f"{name} must be bool, got {type(explicit_value).__name__}")
+            return explicit_value
+        existing = getattr(self, name, default)
+        return bool(existing)
+
+    def _resolve_range_attr(
+        self,
+        name: str,
+        explicit_value: Sequence[float] | None,
+        default: tuple[float, float],
+    ) -> tuple[float, float]:
+        raw: Any = explicit_value if explicit_value is not None else getattr(self, name, default)
+        if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence) or len(raw) != 2:
+            raise ValueError(f"{name} expects exactly 2 values, got: {raw}")
+        return float(raw[0]), float(raw[1])
+
+    def _resolve_choices_attr(
+        self,
+        name: str,
+        explicit_value: Sequence[str] | None,
+        default: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        raw: Any = explicit_value if explicit_value is not None else getattr(self, name, default)
+        if isinstance(raw, (str, bytes)):
+            raise TypeError(f"{name} must be a sequence of strings, got: {raw}")
+        if not isinstance(raw, Sequence):
+            raise TypeError(f"{name} must be a sequence of strings, got: {raw}")
+        choices = tuple(raw)
+        if len(choices) == 0:
+            raise ValueError(f"{name} must not be empty")
+        if not all(isinstance(item, str) for item in choices):
+            raise TypeError(f"{name} must contain only strings, got: {choices}")
+        return choices
+
+    def _is_enabled(self, flag: bool) -> bool:
+        return bool(self.domain_randomization and flag)
+
+    def _ensure_randomization_info(self):
+        if len(self._parallel_randomization_info) != self.num_envs:
+            self._parallel_randomization_info = [dict() for _ in range(self.num_envs)]
+
+    def _set_randomization_value(self, scene_idx: int, key: str, value: Any):
+        self._ensure_randomization_info()
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy().tolist()
+        elif isinstance(value, np.ndarray):
+            value = value.tolist()
+        self._parallel_randomization_info[scene_idx][key] = value
+
+    def get_parallel_randomization_info(self) -> list[dict[str, Any]]:
+        self._ensure_randomization_info()
+        return [dict(item) for item in self._parallel_randomization_info]
+
+    def _cache_joint_drive_defaults(self):
+        self._joint_drive_defaults = {}
+        for joint in self.agent.robot.active_joints:
+            defaults = []
+            for obj in joint._objs:
+                defaults.append(
+                    (
+                        float(obj.stiffness),
+                        float(obj.damping),
+                        float(obj.force_limit),
+                        str(obj.drive_mode),
+                        float(obj.friction),
+                    )
+                )
+            self._joint_drive_defaults[joint.name] = defaults
+
+    def _randomize_joint_drive(self, env_idx: torch.Tensor):
+        if len(self._joint_drive_defaults) == 0:
+            self._cache_joint_drive_defaults()
+
+        for scene_idx_t in env_idx:
+            scene_idx = int(scene_idx_t.item())
+            rng = self._batched_episode_rng[scene_idx]
+
+            stiffness_scale = (
+                float(rng.uniform(*self.joint_stiffness_scale_range))
+                if self._is_enabled(self.randomize_joint_stiffness)
+                else 1.0
+            )
+            damping_scale = (
+                float(rng.uniform(*self.joint_damping_scale_range))
+                if self._is_enabled(self.randomize_joint_damping)
+                else 1.0
+            )
+            force_limit_scale = (
+                float(rng.uniform(*self.joint_force_limit_scale_range))
+                if self._is_enabled(self.randomize_joint_force_limit)
+                else 1.0
+            )
+            friction_abs = (
+                float(rng.uniform(*self.joint_friction_abs_range))
+                if self._is_enabled(self.randomize_joint_friction)
+                else None
+            )
+            drive_mode = (
+                str(rng.choice(self.joint_drive_mode_choices))
+                if self._is_enabled(self.randomize_joint_drive_mode)
+                else None
+            )
+
+            if self._is_enabled(self.randomize_joint_stiffness):
+                self._set_randomization_value(scene_idx, "joint.stiffness_scale", stiffness_scale)
+            if self._is_enabled(self.randomize_joint_damping):
+                self._set_randomization_value(scene_idx, "joint.damping_scale", damping_scale)
+            if self._is_enabled(self.randomize_joint_force_limit):
+                self._set_randomization_value(scene_idx, "joint.force_limit_scale", force_limit_scale)
+            if self._is_enabled(self.randomize_joint_friction) and friction_abs is not None:
+                self._set_randomization_value(scene_idx, "joint.friction_abs", friction_abs)
+            if self._is_enabled(self.randomize_joint_drive_mode) and drive_mode is not None:
+                self._set_randomization_value(scene_idx, "joint.drive_mode", drive_mode)
+
+            for joint in self.agent.robot.active_joints:
+                defaults = self._joint_drive_defaults.get(joint.name)
+                if defaults is None or scene_idx >= len(defaults):
+                    continue
+                (
+                    base_stiffness,
+                    base_damping,
+                    base_force_limit,
+                    base_mode,
+                    base_friction,
+                ) = defaults[scene_idx]
+
+                stiffness = max(base_stiffness * stiffness_scale, 1e-6)
+                damping = max(base_damping * damping_scale, 1e-6)
+                force_limit = max(base_force_limit * force_limit_scale, 1e-6)
+                friction = base_friction if friction_abs is None else max(friction_abs, 0.0)
+                mode = drive_mode if drive_mode is not None else base_mode
+
+                joint._objs[scene_idx].set_drive_properties(
+                    stiffness,
+                    damping,
+                    force_limit,
+                    mode,
+                )
+                joint._objs[scene_idx].friction = friction
 
     def _load_task_scene(self, options: dict):
         """Hook for subclasses to create task-specific actors."""
@@ -153,10 +588,13 @@ class DigitalTwinBaseEnv(BaseEnv):
         self._resize_background_images()
         self._refresh_segmentation_ids()
         self._apply_hand_camera_pose_constant()
+        self._cache_joint_drive_defaults()
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         self.table_scene.initialize(env_idx)
         self._apply_hand_camera_pose_constant()
+        if self._is_enabled(self.randomize_joint_control):
+            self._randomize_joint_drive(env_idx)
 
     # TODO important to check. You should collect real image with the size same with sim camera size.
     def _resize_background_images(self):
