@@ -99,6 +99,11 @@ class EnvWorker(Worker):
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False) # TODO(liangzhi): check this
+        self.co_training_real_num_workers = (
+            self.cfg.env.train.co_training_env_cfg.num_workers
+            if self.use_co_training
+            else 0
+        )
         if not self.only_eval:
             # TODO(liangzhi): Here for adding two env config
             if self.use_co_training:
@@ -172,8 +177,6 @@ class EnvWorker(Worker):
             groups=[(self._group_name, list(range(self._world_size)))],
         )
 
-        self.update_env_cfg()
-
         # TODO(liangzhi): cfg 覆盖
         if self.use_co_training and self._node_group.label == "real":
             true_train_env_cfg = self.cfg.env.train.co_training_env_cfg.copy()
@@ -181,6 +184,8 @@ class EnvWorker(Worker):
 
             setattr(self.cfg.env, "train", true_train_env_cfg)
             setattr(self.cfg.env, "eval", true_eval_env_cfg)
+
+        self.update_env_cfg()
 
         if not self.only_eval:
             train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
@@ -200,90 +205,55 @@ class EnvWorker(Worker):
         if not self.only_eval:
             self._init_env()
 
-    # TODO(liangzhi): A really big bug, override cfgs should not depend on global rank (self._rank)
+    def _get_current_group_rank(self) -> int:
+        if not self.use_co_training:
+            return self._rank
+        if self._node_group.label == "real":
+            return self._rank
+        return self._rank - self.co_training_real_num_workers
+
     def update_env_cfg(self):
+        current_group_rank = self._get_current_group_rank()
         if not self.only_eval:
             # train env
             train_override_cfgs = self.cfg.env.train.get("override_cfgs", None)
             if train_override_cfgs is not None:
-                assert len(train_override_cfgs) > self._rank, (
-                    f"{len(train_override_cfgs)=} > {self._rank=}"
+                assert len(train_override_cfgs) > current_group_rank, (
+                    f"{len(train_override_cfgs)=} > {current_group_rank=}"
                 )
 
                 general_train_override_cfg = OmegaConf.to_container(
                     self.cfg.env.train.get("override_cfg", {}), resolve=True
                 )
                 override_cfg = OmegaConf.to_container(
-                    train_override_cfgs[self._rank], resolve=True
+                    train_override_cfgs[current_group_rank], resolve=True
                 ).copy()
 
                 base_cfg = {}
                 base_cfg = update_nested_cfg(base_cfg, general_train_override_cfg)
                 base_cfg = update_nested_cfg(base_cfg, override_cfg)
                 setattr(self.cfg.env.train, "override_cfg", OmegaConf.create(base_cfg))
-            
-            if self.use_co_training:
-                co_train_env_cfgs = self.cfg.env.train.get("co_training_override_cfg", None)
-                if co_train_env_cfgs is not None:
-                    assert len(co_train_env_cfgs) > self._rank, (
-                        f"{len(co_train_env_cfgs)=} > {self._rank=}"
-                    )
-
-                    general_co_train_override_cfg = OmegaConf.to_container(
-                        self.cfg.env.train.get("co_train_override_cfg", {}), resolve=True
-                    )
-                    override_cfg = OmegaConf.to_container(
-                        co_train_env_cfgs[self._rank], resolve=True
-                    ).copy()
-
-                    base_cfg = {}
-                    base_cfg = update_nested_cfg(base_cfg, general_co_train_override_cfg)
-                    base_cfg = update_nested_cfg(base_cfg, override_cfg)
-                    setattr(self.cfg.env.train.co_training_env_cfg, "override_cfg", OmegaConf.create(base_cfg))
 
         self._inject_realworld_reward_cfg(self.cfg.env.train)
-        if self.use_co_training:
-            self._inject_realworld_reward_cfg(self.cfg.env.train.co_training_env_cfg)
 
         eval_override_cfgs = self.cfg.env.eval.get("override_cfgs", None)
         if eval_override_cfgs is not None:
-            assert len(eval_override_cfgs) > self._rank, (
-                f"{len(eval_override_cfgs)=} > {self._rank=}"
+            assert len(eval_override_cfgs) > current_group_rank, (
+                f"{len(eval_override_cfgs)=} > {current_group_rank=}"
             )
 
             general_eval_override_cfg = OmegaConf.to_container(
                 self.cfg.env.eval.get("override_cfg", {}), resolve=True
             )
             eval_override_cfg = OmegaConf.to_container(
-                eval_override_cfgs[self._rank], resolve=True
+                eval_override_cfgs[current_group_rank], resolve=True
             ).copy()
             base_eval_cfg = {}
             base_eval_cfg = update_nested_cfg(base_eval_cfg, general_eval_override_cfg)
             base_eval_cfg = update_nested_cfg(base_eval_cfg, eval_override_cfg)
             setattr(self.cfg.env.eval, "override_cfg", OmegaConf.create(base_eval_cfg))
 
-        if self.use_co_training:
-            co_train_env_cfgs = self.cfg.env.eval.get("co_training_override_cfg", None)
-            if co_train_env_cfgs is not None:
-                assert len(co_train_env_cfgs) > self._rank, (
-                    f"{len(co_train_env_cfgs)=} > {self._rank=}"
-                )
-
-                general_co_train_override_cfg = OmegaConf.to_container(
-                    self.cfg.env.eval.get("co_train_override_cfg", {}), resolve=True
-                )
-                override_cfg = OmegaConf.to_container(
-                    co_train_env_cfgs[self._rank], resolve=True
-                ).copy()
-
-                base_cfg = {}
-                base_cfg = update_nested_cfg(base_cfg, general_co_train_override_cfg)
-                base_cfg = update_nested_cfg(base_cfg, override_cfg)
-                setattr(self.cfg.env.eval.co_training_env_cfg, "override_cfg", OmegaConf.create(base_cfg))
-
         self._inject_realworld_reward_cfg(self.cfg.env.eval)
-        if self.use_co_training:
-            self._inject_realworld_reward_cfg(self.cfg.env.eval.co_training_env_cfg)
 
     def _inject_realworld_reward_cfg(self, env_cfg: DictConfig):
         if not (self.use_reward_model and self.use_realworld_reward):
