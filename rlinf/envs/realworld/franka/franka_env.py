@@ -88,6 +88,7 @@ class FrankaRobotConfig:
     compliance_param: dict[str, float] = field(default_factory=dict)
     precision_param: dict[str, float] = field(default_factory=dict)
     binary_gripper_threshold: float = 0.5
+    use_zero_one_gripper_action: bool = False
     enable_gripper_penalty: bool = True
     gripper_penalty: float = 0.1
     save_video_path: Optional[str] = None
@@ -265,6 +266,9 @@ class FrankaEnv(gym.Env):
         action (np.ndarray): The action to take, which is a 7D vector representing the desired end-effector position and orientation,
         as well as the gripper action. The first 3 elements correspond to the delta in x, y, z position, the next 3 elements correspond to the delta in rx, ry, rz orientation (in euler angles), and the last element corresponds to the gripper action.
         [x_delta, y_delta, z_delta, rx_delta, ry_delta, rz_delta, gripper_action]
+
+        If use_zero_one_gripper_action=True, gripper_action follows [0, 1]
+        semantics (1=open, 0=close) with legacy [-1, 1] compatibility mapping.
         """
         start_time = time.time()
 
@@ -638,6 +642,32 @@ class FrankaEnv(gym.Env):
 
     def _gripper_action(self, position: float, is_binary: bool = True):
         if is_binary:
+            if self.config.use_zero_one_gripper_action:
+                # If command is already in [0, 1], keep it. Otherwise treat it as
+                # legacy [-1, 1] and map to [0, 1] for incremental migration.
+                if 0.0 <= position <= 1.0:
+                    command_zero_one = float(np.clip(position, 0.0, 1.0))
+                else:
+                    command_zero_one = float(0.5 * (np.clip(position, -1.0, 1.0) + 1.0))
+
+                threshold = float(np.clip(self.config.binary_gripper_threshold, 0.0, 1.0))
+                open_threshold = threshold
+                close_threshold = 1.0 - threshold
+
+                if command_zero_one <= close_threshold and self._franka_state.gripper_open:
+                    self._controller.close_gripper().wait()
+                    time.sleep(0.6)
+                    return True
+                elif (
+                    command_zero_one >= open_threshold
+                    and not self._franka_state.gripper_open
+                ):
+                    self._controller.open_gripper().wait()
+                    time.sleep(0.6)
+                    return True
+                else:
+                    return False
+
             if (
                 position <= -self.config.binary_gripper_threshold
                 and self._franka_state.gripper_open
