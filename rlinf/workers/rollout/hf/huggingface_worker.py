@@ -31,6 +31,8 @@ from rlinf.scheduler import Channel, Cluster, CollectiveGroupOptions, Worker
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.placement import HybridComponentPlacement
 
+# TODO(liangzhi):必须检查这个文件，在拿到了rollout数据后，是否会完全混合，平均分配？
+
 
 class MultiStepRolloutWorker(Worker):
     def __init__(self, cfg: DictConfig):
@@ -63,12 +65,41 @@ class MultiStepRolloutWorker(Worker):
         self.total_num_eval_envs = cfg.env.eval.total_num_envs
         self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
 
-        self.train_batch_size = (
-            self.total_num_train_envs // self._world_size // self.num_pipeline_stages
-        )
-        self.eval_batch_size = (
-            self.total_num_eval_envs // self._world_size // self.num_pipeline_stages
-        )
+        self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False)
+
+        # TODO(liangzhi): recompute num envs
+        if self.use_co_training:
+            self.real_total_num_train_envs = self.cfg.env.train.co_training_env_cfg.total_num_envs
+            self.sim_total_num_train_envs = self.cfg.env.train.total_num_envs
+            self.total_num_train_envs = self.real_total_num_train_envs + self.sim_total_num_train_envs
+            
+            self.real_total_num_eval_envs = self.cfg.env.eval.co_training_env_cfg.total_num_envs
+            self.sim_total_num_eval_envs = self.cfg.env.eval.total_num_envs
+            self.total_num_eval_envs = self.real_total_num_eval_envs + self.sim_total_num_eval_envs
+            
+            self.is_real_node = self._rank < self.cfg.env.train.co_training_env_cfg.num_workers
+
+            if self.is_real_node:
+                self.train_batch_size = (
+                    self.real_total_num_train_envs // self.cfg.env.train.co_training_env_cfg.num_workers // self.num_pipeline_stages
+                )
+                self.eval_batch_size = (
+                    self.real_total_num_eval_envs // self.cfg.env.eval.co_training_env_cfg.num_workers // self.num_pipeline_stages
+                )
+            else:
+                self.train_batch_size = (
+                    self.sim_total_num_train_envs // self.cfg.env.train.num_workers // self.num_pipeline_stages
+                )
+                self.eval_batch_size = (
+                    self.sim_total_num_eval_envs // self.cfg.env.eval.num_workers // self.num_pipeline_stages
+                )
+        else:
+            self.train_batch_size = (
+                self.total_num_train_envs // self._world_size // self.num_pipeline_stages
+            )
+            self.eval_batch_size = (
+                self.total_num_eval_envs // self._world_size // self.num_pipeline_stages
+            )
         self.enable_cuda_graph = cfg.rollout.get("enable_cuda_graph", False)
         self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
 
@@ -127,23 +158,36 @@ class MultiStepRolloutWorker(Worker):
         self.dst_ranks = {}
         self.src_ranks = {}
         if not self.cfg.runner.only_eval:
-            self.dst_ranks = {
-                "train": self._setup_dst_ranks(
-                    self.total_num_train_envs // self.num_pipeline_stages
-                ),
-            }
-            self.src_ranks = {
-                "train": self._setup_src_ranks(
-                    self.total_num_train_envs // self.num_pipeline_stages
-                ),
-            }
+            # TODO(liangzhi): 强制一一对应
+            if self.use_co_training:
+                self.dst_ranks = {
+                    "train": [(self._rank, self.train_batch_size)]
+                }
+                self.src_ranks = {
+                    "train": [(self._rank, self.train_batch_size)]
+                }
+            else:
+                self.dst_ranks = {
+                    "train": self._setup_dst_ranks(
+                        self.total_num_train_envs // self.num_pipeline_stages
+                    ),
+                }
+                self.src_ranks = {
+                    "train": self._setup_src_ranks(
+                        self.total_num_train_envs // self.num_pipeline_stages
+                    ),
+                }
         if self.enable_eval:
-            self.dst_ranks["eval"] = self._setup_dst_ranks(
-                self.total_num_eval_envs // self.num_pipeline_stages
-            )
-            self.src_ranks["eval"] = self._setup_src_ranks(
-                self.total_num_eval_envs // self.num_pipeline_stages
-            )
+            if self.use_co_training:
+                self.dst_ranks["eval"]  = [(self._rank, self.eval_batch_size)]
+                self.src_ranks["eval"] = [(self._rank, self.eval_batch_size)]
+            else:
+                self.dst_ranks["eval"] = self._setup_dst_ranks(
+                    self.total_num_eval_envs // self.num_pipeline_stages
+                )
+                self.src_ranks["eval"] = self._setup_src_ranks(
+                    self.total_num_eval_envs // self.num_pipeline_stages
+                )
 
         self.log_info(f"Rollout worker initialized with dst_ranks: {self.dst_ranks}")
         self.log_info(f"Rollout worker initialized with src_ranks: {self.src_ranks}")

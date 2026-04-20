@@ -41,6 +41,24 @@ from rlinf.utils.nested_dict_process import (
 from rlinf.utils.placement import HybridComponentPlacement
 
 
+# TODO(liangzhi): really import part
+# 问题1：在每个 env worker 中，我应该如何知道自己所在的 rank？即如何知道自己是属于sim还是属于real？
+# 方法：每个worker可以通过self._node_group.label 知道自己所在的node
+# 假设每个 node 上可以被放置的环境不同（franka上放real，4090上放sim）
+# 这样通过读取自身的 node 可以决定我的 env_cls
+# 问题2：Number env 分配问题，现在的假设是把环境均分
+# 方法：需要在 config 指定各自的 env 数量，均分的时候各自均分
+# 问题3：映射分配问题，现在的假设是有一个 dst_rank 和 src_rank 的映射，这个不确定怎么改
+# 方法：可能需要给 common mapping 更多的信息（或者单独写一个函数），来进行映射
+# 问题4：global 的问题，现在的最初版本需要设计成什么逻辑？
+# 方法：最初版本可以不考虑太多，我觉得可以是同时 rollout 1个真机 100 步 + 64 个仿真 100 步
+# 然后把这些数据平均分配训练
+# 问题5：除了映射分配问题，如何保证训练的时候是随机混合的（ppo epoch可不是1）
+# common mapping 可以改成每个node都从一部分仿真和一部分真机拿数据（如何保证随机？）
+# basic solution
+# 1. 在 yaml 里给每个种类的环境分配一个总环境数量
+# 2. common mapping 的时候去掉 assert，强制 rollout 和 env 一一对应
+
 class EnvWorker(Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -80,14 +98,45 @@ class EnvWorker(Worker):
         self.enable_offload = self.cfg.env.train.get("enable_offload", False)
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
+        self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False) # TODO(liangzhi): check this
         if not self.only_eval:
-            self.train_num_envs_per_stage = (
-                self.cfg.env.train.total_num_envs // self._world_size // self.stage_num
-            )
+            # TODO(liangzhi): Here for adding two env config
+            if self.use_co_training:
+                assert (self.cfg.env.train.get("co_training_env_cfg", None) is not None), "Co-training must provide co-training environment config!"
+                if self._node_group.label == "real": # TODO(liangzhi): now we must use sim/real to name the node name, may change another way
+                    self.train_num_envs_per_stage = (
+                        self.cfg.env.train.co_training_env_cfg.total_num_envs // self.cfg.env.train.co_training_env_cfg.num_workers // self.stage_num # TODO(liangzhi): current use parameter for workers' number, but may use auto get
+                    )
+                else:
+                    self.train_num_envs_per_stage = (
+                        self.cfg.env.train.total_num_envs // self.cfg.env.train.num_workers // self.stage_num
+                    )
+            else:
+                self.train_num_envs_per_stage = (
+                    self.cfg.env.train.total_num_envs // self._world_size // self.stage_num
+                )
         if self.enable_eval:
-            self.eval_num_envs_per_stage = (
-                self.cfg.env.eval.total_num_envs // self._world_size // self.stage_num
-            )
+            # TODO(liangzhi): same logic
+            if self.use_co_training:
+                assert (self.cfg.env.eval.get("co_training_env_cfg", None) is not None), "Co-training must provide co-training environment config!"
+                if self._node_group.label == "real": # TODO(liangzhi): now we must use sim/real to name the node name, may change another way
+                    self.eval_num_envs_per_stage = (
+                        self.cfg.env.eval.co_training_env_cfg.total_num_envs // self.cfg.env.eval.co_training_env_cfg.num_workers // self.stage_num # TODO(liangzhi): current use parameter for workers' number, but may use auto get
+                    )
+                else:
+                    self.eval_num_envs_per_stage = (
+                        self.cfg.env.eval.total_num_envs // self.cfg.env.eval.num_workers // self.stage_num
+                    )
+            else:
+                self.eval_num_envs_per_stage = (
+                    self.cfg.env.eval.total_num_envs // self._world_size // self.stage_num
+                )
+        
+        # TODO(liangzhi): 该条件暂时比较特殊，考虑之后去掉
+        if self.use_co_training:
+            assert self.cfg.env.train.max_steps_per_rollout_epoch == self.cfg.env.train.co_training_env_cfg.max_steps_per_rollout_epoch
+            assert self.cfg.env.eval.max_steps_per_rollout_epoch == self.cfg.env.eval.co_training_env_cfg.max_steps_per_rollout_epoch
+
         self.n_train_chunk_steps = (
             self.cfg.env.train.max_steps_per_rollout_epoch
             // self.cfg.actor.model.num_action_chunks
@@ -125,6 +174,14 @@ class EnvWorker(Worker):
 
         self.update_env_cfg()
 
+        # TODO(liangzhi): cfg 覆盖
+        if self.use_co_training and self._node_group.label == "real":
+            true_train_env_cfg = self.cfg.env.train.co_training_env_cfg.copy()
+            true_eval_env_cfg = self.cfg.env.eval.co_training_env_cfg.copy()
+
+            setattr(self.cfg.env, "train", true_train_env_cfg)
+            setattr(self.cfg.env, "eval", true_eval_env_cfg)
+
         if not self.only_eval:
             train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
             self.env_list = self._setup_env_and_wrappers(
@@ -143,6 +200,7 @@ class EnvWorker(Worker):
         if not self.only_eval:
             self._init_env()
 
+    # TODO(liangzhi): A really big bug, override cfgs should not depend on global rank (self._rank)
     def update_env_cfg(self):
         if not self.only_eval:
             # train env
@@ -163,7 +221,30 @@ class EnvWorker(Worker):
                 base_cfg = update_nested_cfg(base_cfg, general_train_override_cfg)
                 base_cfg = update_nested_cfg(base_cfg, override_cfg)
                 setattr(self.cfg.env.train, "override_cfg", OmegaConf.create(base_cfg))
+            
+            if self.use_co_training:
+                co_train_env_cfgs = self.cfg.env.train.get("co_training_override_cfg", None)
+                if co_train_env_cfgs is not None:
+                    assert len(co_train_env_cfgs) > self._rank, (
+                        f"{len(co_train_env_cfgs)=} > {self._rank=}"
+                    )
+
+                    general_co_train_override_cfg = OmegaConf.to_container(
+                        self.cfg.env.train.get("co_train_override_cfg", {}), resolve=True
+                    )
+                    override_cfg = OmegaConf.to_container(
+                        co_train_env_cfgs[self._rank], resolve=True
+                    ).copy()
+
+                    base_cfg = {}
+                    base_cfg = update_nested_cfg(base_cfg, general_co_train_override_cfg)
+                    base_cfg = update_nested_cfg(base_cfg, override_cfg)
+                    setattr(self.cfg.env.train.co_training_env_cfg, "override_cfg", OmegaConf.create(base_cfg))
+
         self._inject_realworld_reward_cfg(self.cfg.env.train)
+        if self.use_co_training:
+            self._inject_realworld_reward_cfg(self.cfg.env.train.co_training_env_cfg)
+
         eval_override_cfgs = self.cfg.env.eval.get("override_cfgs", None)
         if eval_override_cfgs is not None:
             assert len(eval_override_cfgs) > self._rank, (
@@ -180,7 +261,29 @@ class EnvWorker(Worker):
             base_eval_cfg = update_nested_cfg(base_eval_cfg, general_eval_override_cfg)
             base_eval_cfg = update_nested_cfg(base_eval_cfg, eval_override_cfg)
             setattr(self.cfg.env.eval, "override_cfg", OmegaConf.create(base_eval_cfg))
+
+        if self.use_co_training:
+            co_train_env_cfgs = self.cfg.env.eval.get("co_training_override_cfg", None)
+            if co_train_env_cfgs is not None:
+                assert len(co_train_env_cfgs) > self._rank, (
+                    f"{len(co_train_env_cfgs)=} > {self._rank=}"
+                )
+
+                general_co_train_override_cfg = OmegaConf.to_container(
+                    self.cfg.env.eval.get("co_train_override_cfg", {}), resolve=True
+                )
+                override_cfg = OmegaConf.to_container(
+                    co_train_env_cfgs[self._rank], resolve=True
+                ).copy()
+
+                base_cfg = {}
+                base_cfg = update_nested_cfg(base_cfg, general_co_train_override_cfg)
+                base_cfg = update_nested_cfg(base_cfg, override_cfg)
+                setattr(self.cfg.env.eval.co_training_env_cfg, "override_cfg", OmegaConf.create(base_cfg))
+
         self._inject_realworld_reward_cfg(self.cfg.env.eval)
+        if self.use_co_training:
+            self._inject_realworld_reward_cfg(self.cfg.env.eval.co_training_env_cfg)
 
     def _inject_realworld_reward_cfg(self, env_cfg: DictConfig):
         if not (self.use_reward_model and self.use_realworld_reward):
@@ -267,44 +370,58 @@ class EnvWorker(Worker):
         """
         dst_rank_map = {}
         if not self.only_eval:
-            dst_rank_map = {
-                "rollout_train": CommMapper.get_dst_ranks(
-                    batch_size=self.cfg.env.train.total_num_envs // self.stage_num,
-                    src_world_size=self._component_placement.get_world_size("env"),
-                    dst_world_size=self._component_placement.get_world_size("rollout"),
-                    src_rank=self._rank,
-                ),
-            }
-            if self.cfg.get("reward", {}).get("use_reward_model", False):
+            if self.use_co_training:
+                assert (self.cfg.get("reward", {}).get("use_reward_model", False) is False), "not support reward model for co-training!"
+                # TODO(liangzhi): 使用一一映射的方式
+                dst_rank_map = {
+                    "rollout_train": [(self._rank, self.train_num_envs_per_stage)],
+                }
+            else:
+                dst_rank_map = {
+                    "rollout_train": CommMapper.get_dst_ranks(
+                        batch_size=self.cfg.env.train.total_num_envs // self.stage_num,
+                        src_world_size=self._component_placement.get_world_size("env"),
+                        dst_world_size=self._component_placement.get_world_size("rollout"),
+                        src_rank=self._rank,
+                    ),
+                }
+                if self.cfg.get("reward", {}).get("use_reward_model", False):
+                    dst_rank_map.update(
+                        {
+                            "reward_train": CommMapper.get_dst_ranks(
+                                batch_size=self.cfg.env.train.total_num_envs
+                                // self.stage_num,
+                                src_world_size=self._component_placement.get_world_size(
+                                    "env"
+                                ),
+                                dst_world_size=self._component_placement.get_world_size(
+                                    "reward"
+                                ),
+                                src_rank=self._rank,
+                            ),
+                        }
+                    )
+
+        if self.enable_eval:
+            if self.use_co_training:
                 dst_rank_map.update(
                     {
-                        "reward_train": CommMapper.get_dst_ranks(
-                            batch_size=self.cfg.env.train.total_num_envs
-                            // self.stage_num,
-                            src_world_size=self._component_placement.get_world_size(
-                                "env"
-                            ),
+                        "rollout_eval": [(self._rank, self.eval_num_envs_per_stage)],
+                    }
+                )
+            else:
+                dst_rank_map.update(
+                    {
+                        "rollout_eval": CommMapper.get_dst_ranks(
+                            batch_size=self.cfg.env.eval.total_num_envs // self.stage_num,
+                            src_world_size=self._component_placement.get_world_size("env"),
                             dst_world_size=self._component_placement.get_world_size(
-                                "reward"
+                                "rollout"
                             ),
                             src_rank=self._rank,
                         ),
                     }
                 )
-
-        if self.enable_eval:
-            dst_rank_map.update(
-                {
-                    "rollout_eval": CommMapper.get_dst_ranks(
-                        batch_size=self.cfg.env.eval.total_num_envs // self.stage_num,
-                        src_world_size=self._component_placement.get_world_size("env"),
-                        dst_world_size=self._component_placement.get_world_size(
-                            "rollout"
-                        ),
-                        src_rank=self._rank,
-                    ),
-                }
-            )
         return dst_rank_map
 
     def _setup_src_rank_map(self) -> dict[str, list[tuple[int, int]]]:
@@ -319,43 +436,57 @@ class EnvWorker(Worker):
         """
         src_rank_map = {}
         if not self.only_eval:
-            src_rank_map = {
-                "rollout_train": CommMapper.get_src_ranks(
-                    batch_size=self.cfg.env.train.total_num_envs // self.stage_num,
-                    src_world_size=self._component_placement.get_world_size("rollout"),
-                    dst_world_size=self._component_placement.get_world_size("env"),
-                    dst_rank=self._rank,
-                ),
-            }
-            if self.cfg.get("reward", {}).get("use_reward_model", False):
-                src_rank_map.update(
-                    {
-                        "reward_train": CommMapper.get_src_ranks(
-                            batch_size=self.cfg.env.train.total_num_envs
-                            // self.stage_num,
-                            src_world_size=self._component_placement.get_world_size(
-                                "reward"
-                            ),
-                            dst_world_size=self._component_placement.get_world_size(
-                                "env"
-                            ),
-                            dst_rank=self._rank,
-                        ),
-                    }
-                )
-        if self.enable_eval:
-            src_rank_map.update(
-                {
-                    "rollout_eval": CommMapper.get_src_ranks(
-                        batch_size=self.cfg.env.eval.total_num_envs // self.stage_num,
-                        src_world_size=self._component_placement.get_world_size(
-                            "rollout"
-                        ),
+            if self.use_co_training:
+                assert (self.cfg.get("reward", {}).get("use_reward_model", False) is False), "not support reward model for co-training!"
+                # TODO(liangzhi): 使用一一映射的方式
+                src_rank_map = {
+                    "rollout_train": [(self._rank, self.train_num_envs_per_stage)],
+                }
+            else:
+                src_rank_map = {
+                    "rollout_train": CommMapper.get_src_ranks(
+                        batch_size=self.cfg.env.train.total_num_envs // self.stage_num,
+                        src_world_size=self._component_placement.get_world_size("rollout"),
                         dst_world_size=self._component_placement.get_world_size("env"),
                         dst_rank=self._rank,
                     ),
                 }
-            )
+                if self.cfg.get("reward", {}).get("use_reward_model", False):
+                    src_rank_map.update(
+                        {
+                            "reward_train": CommMapper.get_src_ranks(
+                                batch_size=self.cfg.env.train.total_num_envs
+                                // self.stage_num,
+                                src_world_size=self._component_placement.get_world_size(
+                                    "reward"
+                                ),
+                                dst_world_size=self._component_placement.get_world_size(
+                                    "env"
+                                ),
+                                dst_rank=self._rank,
+                            ),
+                        }
+                    )
+        if self.enable_eval:
+            if self.use_co_training:
+                src_rank_map.update(
+                    {
+                        "rollout_eval": [(self._rank, self.eval_num_envs_per_stage)],
+                    }
+                )
+            else:
+                src_rank_map.update(
+                    {
+                        "rollout_eval": CommMapper.get_src_ranks(
+                            batch_size=self.cfg.env.eval.total_num_envs // self.stage_num,
+                            src_world_size=self._component_placement.get_world_size(
+                                "rollout"
+                            ),
+                            dst_world_size=self._component_placement.get_world_size("env"),
+                            dst_rank=self._rank,
+                        ),
+                    }
+                )
         return src_rank_map
 
     def _init_env(self):

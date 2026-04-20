@@ -13,6 +13,10 @@
 # limitations under the License.
 
 
+# TODO(liangzhi): 这一块也很重要
+# 由于原来的逻辑都是在均分环境，因此这边也需要根据 co-training 的最新想法进行适配。
+
+
 class CommMapper:
     """Communication mapping helpers with batch sharding among two worker groups that require fixed rank pairing in communications.
 
