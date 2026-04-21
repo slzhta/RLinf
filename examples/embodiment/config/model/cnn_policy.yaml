@@ -5,6 +5,7 @@ model_path: ""
 policy_setup: "panda-ee-dpos"
 image_size: [3, 128, 128]
 state_dim: 29
+use_state: True
 action_dim: 4
 num_action_chunks: 1
 hidden_dim: 256

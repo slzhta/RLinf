@@ -22,6 +22,9 @@ from rlinf.envs.realworld.franka.tasks.franka_bin_relocation import (
 from rlinf.envs.realworld.franka.tasks.peg_insertion_env import (
     PegInsertionEnv as PegInsertionEnv,
 )
+from rlinf.envs.realworld.franka.tasks.push_button_env import (
+    FrankaPushButtonEnv as FrankaPushButtonEnv,
+)
 from rlinf.envs.realworld.franka.tasks.co_training_base_env import (
     FrankaCoTrainingBaseEnv as FrankaCoTrainingBaseEnv
 )
@@ -46,4 +49,9 @@ register(id="BottleEnv-v1", entry_point="rlinf.envs.realworld.franka.tasks:Bottl
 register(
     id="FrankaCoTrainingBaseEnv-v1", 
     entry_point="rlinf.envs.realworld.franka.tasks:FrankaCoTrainingBaseEnv"
+)
+
+register(
+    id="FrankaPushButtonEnv-v1",
+    entry_point="rlinf.envs.realworld.franka.tasks:FrankaPushButtonEnv",
 )

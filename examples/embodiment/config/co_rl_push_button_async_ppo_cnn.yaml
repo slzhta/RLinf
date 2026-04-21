@@ -1,4 +1,4 @@
-# Co-training config: ManiSkill push-button simulation + real-world peg insertion.
+# Co-training config: ManiSkill push-button simulation + Franka push-button real-world.
 defaults:
   - env/maniskill_push_button_co_rl@env.train
   - env/maniskill_push_button_co_rl@env.eval
@@ -167,6 +167,7 @@ actor:
     model_path: "/path/to/model"
     add_value_head: True
     add_q_head: False
+    use_state: False
     state_dim: 19
     action_dim: 6
 

@@ -34,6 +34,7 @@ class CNNConfig:
     image_num: int = 1
     action_dim: int = 4
     state_dim: int = 29
+    use_state: bool = True
     num_action_chunks: int = 1
     backbone: str = "resnet"
     model_path: Optional[str] = None
@@ -104,22 +105,25 @@ class CNNPolicy(nn.Module, BasePolicy):
             raise NotImplementedError
 
         if self.cfg.backbone == "resnet":
-            self.state_proj = nn.Sequential(
-                *make_mlp(
-                    in_channels=self.cfg.state_dim,
-                    mlp_channels=[
-                        self.cfg.state_latent_dim,
-                    ],
-                    act_builder=nn.Tanh,
-                    last_act=True,
-                    use_layer_norm=True,
+            mixed_input_dim = encoder_out_dim
+            if self.cfg.use_state:
+                self.state_proj = nn.Sequential(
+                    *make_mlp(
+                        in_channels=self.cfg.state_dim,
+                        mlp_channels=[
+                            self.cfg.state_latent_dim,
+                        ],
+                        act_builder=nn.Tanh,
+                        last_act=True,
+                        use_layer_norm=True,
+                    )
                 )
-            )
-            self.state_proj._fsdp_wrap_name = "state_proj"
-            init_mlp_weights(self.state_proj, nonlinearity="tanh")
+                self.state_proj._fsdp_wrap_name = "state_proj"
+                init_mlp_weights(self.state_proj, nonlinearity="tanh")
+                mixed_input_dim += self.cfg.state_latent_dim
             self.mix_proj = nn.Sequential(
                 *make_mlp(
-                    in_channels=encoder_out_dim + self.cfg.state_latent_dim,
+                    in_channels=mixed_input_dim,
                     mlp_channels=[256, 256],
                     act_builder=nn.Tanh,
                     last_act=True,
@@ -139,7 +143,9 @@ class CNNPolicy(nn.Module, BasePolicy):
             )
         if self.cfg.add_q_head:
             if self.cfg.backbone == "resnet":
-                hidden_size = encoder_out_dim + self.cfg.state_latent_dim
+                hidden_size = encoder_out_dim + (
+                    self.cfg.state_latent_dim if self.cfg.use_state else 0
+                )
                 hidden_dims = [256, 256]
             if self.cfg.q_head_type == "default":
                 self.q_head = MultiQHead(
@@ -175,7 +181,7 @@ class CNNPolicy(nn.Module, BasePolicy):
     def _get_feature_from_processed_tensors(
         self,
         main_images: torch.Tensor,
-        states: torch.Tensor,
+        states: Optional[torch.Tensor],
         extra_view_images: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         visual_features = []
@@ -193,8 +199,12 @@ class CNNPolicy(nn.Module, BasePolicy):
                 images = images.permute(0, 3, 1, 2)
             visual_features.append(self.encoders[img_id](images))
         visual_feature = torch.cat(visual_features, dim=-1)
-        state_embed = self.state_proj(states)
-        full_feature = torch.cat([visual_feature, state_embed], dim=1)
+        full_feature = visual_feature
+        if self.cfg.use_state:
+            if states is None:
+                raise ValueError("states is required when CNNPolicy cfg.use_state=True.")
+            state_embed = self.state_proj(states)
+            full_feature = torch.cat([visual_feature, state_embed], dim=1)
         return full_feature, visual_feature
 
     def _policy_head(
@@ -211,7 +221,7 @@ class CNNPolicy(nn.Module, BasePolicy):
     def _actor_forward_from_processed_tensors(
         self,
         main_images: torch.Tensor,
-        states: torch.Tensor,
+        states: Optional[torch.Tensor],
         extra_view_images: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         full_feature, _ = self._get_feature_from_processed_tensors(
@@ -232,7 +242,8 @@ class CNNPolicy(nn.Module, BasePolicy):
         std = self.img_std.to(device)
 
         processed_env_obs = {}
-        processed_env_obs["states"] = env_obs["states"].clone().to(device)
+        if self.cfg.use_state and env_obs.get("states") is not None:
+            processed_env_obs["states"] = env_obs["states"].clone().to(device)
         x = env_obs["main_images"].clone().to(device).float() / 255.0
         processed_env_obs["main_images"] = (x - mean) / std
 
@@ -246,7 +257,7 @@ class CNNPolicy(nn.Module, BasePolicy):
     def get_feature(self, obs, detach_encoder=False):
         x, visual_feature = self._get_feature_from_processed_tensors(
             main_images=obs["main_images"],
-            states=obs["states"],
+            states=obs.get("states"),
             extra_view_images=obs.get("extra_view_images"),
         )
         if detach_encoder:
@@ -288,8 +299,9 @@ class CNNPolicy(nn.Module, BasePolicy):
     ):
         obs = {
             "main_images": forward_inputs["main_images"],
-            "states": forward_inputs["states"],
         }
+        if "states" in forward_inputs:
+            obs["states"] = forward_inputs["states"]
         if "extra_view_images" in forward_inputs:
             obs["extra_view_images"] = forward_inputs["extra_view_images"]
         obs = self.preprocess_env_obs(obs)
@@ -297,7 +309,7 @@ class CNNPolicy(nn.Module, BasePolicy):
         full_feature, mix_feature, action_mean, action_logstd = (
             self._actor_forward_from_processed_tensors(
                 obs["main_images"],
-                obs["states"],
+                obs.get("states"),
                 obs.get("extra_view_images"),
             )
         )
@@ -323,7 +335,7 @@ class CNNPolicy(nn.Module, BasePolicy):
         full_feature, mix_feature, action_mean, action_logstd = (
             self._actor_forward_from_processed_tensors(
                 obs["main_images"],
-                obs["states"],
+                obs.get("states"),
                 obs.get("extra_view_images"),
             )
         )
@@ -348,7 +360,7 @@ class CNNPolicy(nn.Module, BasePolicy):
 
     def _generate_actions(
         self,
-        states: torch.Tensor,
+        states: Optional[torch.Tensor],
         main_images: torch.Tensor,
         extra_view_images: Optional[torch.Tensor],
         calculate_values: bool,
@@ -411,7 +423,7 @@ class CNNPolicy(nn.Module, BasePolicy):
         obs = self.preprocess_env_obs(env_obs)
         action, chunk_actions, chunk_logprobs, chunk_values, full_feature = (
             self._generate_actions(
-                states=obs["states"],
+                states=obs.get("states"),
                 main_images=obs["main_images"],
                 extra_view_images=obs.get("extra_view_images"),
                 mode=mode,
@@ -422,7 +434,8 @@ class CNNPolicy(nn.Module, BasePolicy):
 
         if return_obs:
             forward_inputs["main_images"] = env_obs["main_images"]
-            forward_inputs["states"] = env_obs["states"]
+            if "states" in env_obs and env_obs["states"] is not None:
+                forward_inputs["states"] = env_obs["states"]
             if (
                 "extra_view_images" in env_obs
                 and env_obs["extra_view_images"] is not None
@@ -503,15 +516,16 @@ class CNNPolicy(nn.Module, BasePolicy):
         if image_size[0] == 3:
             image_size = [image_size[1], image_size[2], image_size[0]]
         inputs = {
-            "states": torch.zeros(
-                (batch_size, self.cfg.state_dim), device=device, dtype=dtype
-            ),
             "main_images": torch.zeros(
                 (batch_size, *image_size),
                 device=device,
                 dtype=dtype,
             ),
         }
+        if self.cfg.use_state:
+            inputs["states"] = torch.zeros(
+                (batch_size, self.cfg.state_dim), device=device, dtype=dtype
+            )
         if self.cfg.image_num > 1:
             inputs["extra_view_images"] = torch.zeros(
                 (batch_size, self.cfg.image_num - 1, *image_size),
@@ -524,7 +538,7 @@ class CNNPolicy(nn.Module, BasePolicy):
         ) -> dict[str, torch.Tensor]:
             action, chunk_actions, chunk_logprobs, chunk_values, full_feature = (
                 self._generate_actions(
-                    states=inputs["states"],
+                    states=inputs.get("states"),
                     main_images=inputs["main_images"],
                     extra_view_images=inputs["extra_view_images"]
                     if "extra_view_images" in inputs
@@ -546,7 +560,9 @@ class CNNPolicy(nn.Module, BasePolicy):
         graph_name = (
             f"action_generation_{batch_size}_{detach_encoder}_{calculate_values}_{mode}"
         )
-        external_inputs = {"states", "main_images"}
+        external_inputs = {"main_images"}
+        if self.cfg.use_state:
+            external_inputs.add("states")
         if self.cfg.image_num > 1:
             external_inputs.add("extra_view_images")
         spec = GraphCaptureSpec(
@@ -605,9 +621,10 @@ class CNNPolicy(nn.Module, BasePolicy):
                 f"action_generation_{batch_size}_{False}_{calculate_values}_{mode}"
             )
             inputs = {
-                "states": states,
                 "main_images": main_images,
             }
+            if self.cfg.use_state:
+                inputs["states"] = states
             if self.cfg.image_num > 1:
                 inputs["extra_view_images"] = extra_view_images
 

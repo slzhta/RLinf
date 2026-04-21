@@ -163,8 +163,36 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
         return pose
 
     def _crop_frame(self, name, image):
-        """Crop realsense images to be a square."""
-        return image[:, 80:560, :]
+        """Pad realsense images to a square with symmetric black borders."""
+        h, w, _ = image.shape
+        if h == w:
+            return image
+        if h < w:
+            pad = w - h
+            pad_top = pad // 2
+            pad_bottom = pad - pad_top
+            return cv2.copyMakeBorder(
+                image,
+                pad_top,
+                pad_bottom,
+                0,
+                0,
+                cv2.BORDER_CONSTANT,
+                value=(0, 0, 0),
+            )
+
+        pad = h - w
+        pad_left = pad // 2
+        pad_right = pad - pad_left
+        return cv2.copyMakeBorder(
+            image,
+            0,
+            0,
+            pad_left,
+            pad_right,
+            cv2.BORDER_CONSTANT,
+            value=(0, 0, 0),
+        )
 
     def _get_camera_frames(self):
         images = {}

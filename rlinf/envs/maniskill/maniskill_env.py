@@ -60,6 +60,7 @@ class ManiskillEnv(gym.Env):
         self.use_rel_reward = cfg.use_rel_reward
         self.ignore_terminations = cfg.ignore_terminations
         self.use_full_state = bool(getattr(cfg, "use_full_state", False))
+        self.include_states_in_obs = bool(getattr(cfg, "include_states_in_obs", True))
         self.num_group = num_envs // cfg.group_size
         self.group_size = cfg.group_size
         self.use_fixed_reset_state_ids = cfg.use_fixed_reset_state_ids
@@ -147,11 +148,14 @@ class ManiskillEnv(gym.Env):
         wrap_obs_mode = getattr(self.cfg, "wrap_obs_mode", "default")
         if wrap_obs_mode == "raw":
             assert infos is not None
-            return infos["extracted_obs"]
+            extracted_obs = dict(infos["extracted_obs"])
+            if not self.include_states_in_obs:
+                extracted_obs.pop("states", None)
+            return extracted_obs
 
         if wrap_obs_mode == "simple":
             if self.env.unwrapped.obs_mode == "state":
-                return {"states": raw_obs}
+                return {"states": raw_obs} if self.include_states_in_obs else {}
             elif self.env.unwrapped.obs_mode == "rgb":
                 sensor_data = raw_obs.pop("sensor_data")
                 raw_obs.pop("sensor_param")
@@ -170,11 +174,13 @@ class ManiskillEnv(gym.Env):
                     if sorted_images
                     else None
                 )
-                return {
+                obs = {
                     "main_images": main_images,
                     "extra_view_images": extra_view_images,
-                    "states": state,
                 }
+                if self.include_states_in_obs:
+                    obs["states"] = state
+                return obs
 
         # Default
         obs_image = raw_obs["sensor_data"]["3rd_view_camera"]["rgb"].to(
@@ -183,11 +189,13 @@ class ManiskillEnv(gym.Env):
         proprioception: torch.Tensor = self.env.unwrapped.agent.robot.get_qpos().to(
             obs_image.device, dtype=torch.float32
         )
-        return {
+        obs = {
             "main_images": obs_image,
-            "states": proprioception,
             "task_descriptions": self.instruction,
         }
+        if self.include_states_in_obs:
+            obs["states"] = proprioception
+        return obs
 
     def _get_full_state_obs(self):
         base_env = self.env.unwrapped

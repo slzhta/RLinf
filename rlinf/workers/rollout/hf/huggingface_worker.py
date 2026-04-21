@@ -93,6 +93,7 @@ class MultiStepRolloutWorker(Worker):
                 self.train_batch_size = (
                     self.sim_total_num_train_envs // self.cfg.env.train.num_workers // self.num_pipeline_stages
                 )
+                self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
                 self.eval_batch_size = (
                     self.sim_total_num_eval_envs // self.cfg.env.eval.num_workers // self.num_pipeline_stages
                 )

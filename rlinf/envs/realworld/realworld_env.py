@@ -63,6 +63,7 @@ class RealWorldEnv(gym.Env):
         self.num_group = num_envs // cfg.group_size
         self.group_size = cfg.group_size
         self.main_image_key = cfg.main_image_key
+        self.include_states_in_obs = bool(getattr(cfg, "include_states_in_obs", True))
 
         self._init_env()
 
@@ -252,8 +253,9 @@ class RealWorldEnv(gym.Env):
         raw_states = OrderedDict(sorted(raw_obs["state"].items()))
         for value in raw_states.values():
             full_states.append(value)
-        full_states = np.concatenate(full_states, axis=-1)
-        obs["states"] = full_states
+        if self.include_states_in_obs:
+            full_states = np.concatenate(full_states, axis=-1)
+            obs["states"] = full_states
 
         # Process images
         if self.main_image_key not in raw_obs["frames"]:

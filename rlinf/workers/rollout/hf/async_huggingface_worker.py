@@ -76,7 +76,14 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
             for _ in range(self.rollout_epoch):
                 await self.generate_one_epoch(input_channel, output_channel)
             if self.finished_episodes is not None:
-                self.finished_episodes += self.total_num_train_envs * self.rollout_epoch
+                if self.async_use_local_env:
+                    self.finished_episodes += (
+                        self.local_num_train_envs * self.rollout_epoch
+                    )
+                else:
+                    self.finished_episodes += (
+                        self.total_num_train_envs * self.rollout_epoch
+                    )
             rollout_metrics = self.pop_execution_times()
             rollout_metrics = {
                 f"time/rollout/{k}": v for k, v in rollout_metrics.items()

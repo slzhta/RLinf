@@ -13,6 +13,7 @@ max_steps_per_rollout_epoch: 100
 max_episode_steps: 100 # max episode steps for truncation
 reward_mode: raw
 wrap_obs_mode: raw
+include_states_in_obs: False
 
 enable_offload: False
 
@@ -36,3 +37,12 @@ init_params:
   render_mode: rgb_array
   reward_mode: normalized_dense
   use_sparse_reward: true
+  domain_randomization:
+    enabled: false
+    randomize_lighting: false
+    randomize_joint_control: false
+    randomize_joint_stiffness: false
+    randomize_joint_damping: false
+    randomize_joint_force_limit: false
+    randomize_joint_friction: false
+    randomize_joint_drive_mode: false

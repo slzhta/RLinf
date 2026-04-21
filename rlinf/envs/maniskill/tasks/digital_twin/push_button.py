@@ -1,9 +1,12 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import sapien
 import torch
+import torch.nn.functional as F
 from sapien.physx import PhysxMaterial
+from transforms3d.euler import mat2euler
 
 from mani_skill.utils.registration import register_env
 
@@ -18,6 +21,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     BUTTON_POSE = sapien.Pose(p=[0.0, 0.0, 0.02], q=[0, 1, 0, 0])
     BUTTON_FORCE_THRESHOLD = 0.05
+    OUTPUT_IMAGE_SIZE = 128
     BUTTON_ASSET_DIR = (
         Path(__file__).resolve().parent / "assets" / "objects" / "button"
     )
@@ -111,3 +115,78 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
         builder.initial_pose = self.BUTTON_POSE
         return builder.build_kinematic(name="button")
+
+    def _build_extracted_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
+        sensor_data = raw_obs.get("sensor_data", {})
+        main_images = self._pad_and_resize_images(
+            sensor_data["3rdview_camera"]["rgb"].to(torch.uint8)
+        )
+
+        extracted_obs = {
+            "main_images": main_images,
+            "task_descriptions": self.get_language_instruction(),
+        }
+
+        if "hand_camera" in sensor_data:
+            extracted_obs["extra_view_images"] = (
+                self._pad_and_resize_images(
+                    sensor_data["hand_camera"]["rgb"].to(torch.uint8)
+                ).unsqueeze(1)
+            )
+
+        gripper_state = self.agent.robot.get_qpos().to(torch.float32)[:, -1:] * 2
+        ee_pose_t = (
+            self.agent.ee_pose_at_robot_base.to_transformation_matrix().cpu().numpy()
+        )
+        pos = torch.from_numpy(ee_pose_t[:, :3, 3]).to(gripper_state.device)
+        euler = torch.from_numpy(
+            np.stack(
+                [mat2euler(ee_pose_t[i, :3, :3], "sxyz") for i in range(self.num_envs)],
+                axis=0,
+            )
+        ).to(gripper_state.device, dtype=torch.float32)
+        extracted_obs["states"] = torch.cat([pos, euler, gripper_state], dim=1)
+        return extracted_obs
+
+    def _pad_and_resize_images(self, images: torch.Tensor) -> torch.Tensor:
+        if images.dim() != 4:
+            raise ValueError(f"Expected image tensor with shape [B, H, W, C], got {images.shape}.")
+
+        _, height, width, _ = images.shape
+        if height < width:
+            pad = width - height
+            pad_top = pad // 2
+            pad_bottom = pad - pad_top
+            pad_left = 0
+            pad_right = 0
+        else:
+            pad = height - width
+            pad_left = pad // 2
+            pad_right = pad - pad_left
+            pad_top = 0
+            pad_bottom = 0
+
+        nchw_images = images.permute(0, 3, 1, 2).to(torch.float32)
+        padded_images = F.pad(
+            nchw_images,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode="constant",
+            value=0.0,
+        )
+        resized_images = F.interpolate(
+            padded_images,
+            size=(self.OUTPUT_IMAGE_SIZE, self.OUTPUT_IMAGE_SIZE),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return resized_images.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
+
+    def reset(self, seed=None, options=None):
+        raw_obs, infos = super().reset(seed=seed, options=options)
+        infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, infos
+
+    def step(self, action):
+        raw_obs, reward, terminations, truncations, infos = super().step(action)
+        infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, reward, terminations, truncations, infos

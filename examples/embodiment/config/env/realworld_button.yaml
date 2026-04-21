@@ -13,6 +13,7 @@ max_steps_per_rollout_epoch: 100
 max_episode_steps: 100
 use_spacemouse: True
 main_image_key: wrist_1
+include_states_in_obs: False
 
 video_cfg:
   save_video: False
@@ -20,5 +21,5 @@ video_cfg:
   video_base_dir: ${runner.logger.log_path}/video/train
 
 init_params:
-  id: "ButtonEnv-v1"
+  id: "FrankaPushButtonEnv-v1"
   num_envs: null
