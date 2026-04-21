@@ -66,9 +66,11 @@ class MultiStepRolloutWorker(Worker):
         self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
 
         self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False)
+        self.async_use_local_env = False
 
         # TODO(liangzhi): recompute num envs
         if self.use_co_training:
+            self.async_use_local_env = True
             self.real_total_num_train_envs = self.cfg.env.train.co_training_env_cfg.total_num_envs
             self.sim_total_num_train_envs = self.cfg.env.train.total_num_envs
             self.total_num_train_envs = self.real_total_num_train_envs + self.sim_total_num_train_envs
@@ -83,6 +85,7 @@ class MultiStepRolloutWorker(Worker):
                 self.train_batch_size = (
                     self.real_total_num_train_envs // self.cfg.env.train.co_training_env_cfg.num_workers // self.num_pipeline_stages
                 )
+                self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
                 self.eval_batch_size = (
                     self.real_total_num_eval_envs // self.cfg.env.eval.co_training_env_cfg.num_workers // self.num_pipeline_stages
                 )
@@ -690,8 +693,13 @@ class MultiStepRolloutWorker(Worker):
     def set_global_step(self, global_step: int):
         self.version = global_step
         if self.finished_episodes is None:
-            self.finished_episodes = (
-                self.version * self.total_num_train_envs * self.rollout_epoch
-            )
+            if self.async_use_local_env:
+                self.finished_episodes = (
+                    self.version * self.local_num_train_envs * self.rollout_epoch
+                )
+            else:
+                self.finished_episodes = (
+                    self.version * self.total_num_train_envs * self.rollout_epoch
+                )
         if hasattr(self.hf_model, "set_global_step"):
             self.hf_model.set_global_step(global_step)

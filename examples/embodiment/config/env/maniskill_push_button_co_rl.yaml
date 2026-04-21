@@ -22,10 +22,10 @@ video_cfg:
   video_base_dir: ${runner.logger.log_path}/video/train
 
 init_params:
-  id: PandaPutOnPlateInScene25DigitalTwin-v1
+  id: PushButton-v1
   num_envs: null # will be set in ManiSkillEnv init
   obs_mode: "rgb+segmentation"
-  control_mode: pd_ee_body_target_delta_pose_real_root_frame
+  control_mode: pd_ee_body_target_delta_pose_real
   sim_backend: "gpu"
   sim_config:
     sim_freq: 500

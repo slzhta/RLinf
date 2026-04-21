@@ -2,8 +2,8 @@
 defaults:
   - env/maniskill_push_button_co_rl@env.train
   - env/maniskill_push_button_co_rl@env.eval
-  - env/realworld_peg_insertion@env.train.co_training_env_cfg
-  - env/realworld_peg_insertion@env.eval.co_training_env_cfg
+  - env/realworld_button@env.train.co_training_env_cfg
+  - env/realworld_button@env.eval.co_training_env_cfg
   - model/cnn_policy@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout

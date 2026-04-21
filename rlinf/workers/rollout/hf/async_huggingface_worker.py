@@ -27,11 +27,12 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
         super().__init__(cfg)
         self._generate_task: asyncio.Task = None
         self.staleness_threshold = cfg.algorithm.get("staleness_threshold", None)
-        self.num_envs_per_stage = (
-            self.cfg.env.train.total_num_envs
-            // self._world_size
-            // self.num_pipeline_stages
-        )
+        if not self.use_co_training:
+            self.num_envs_per_stage = (
+                self.cfg.env.train.total_num_envs
+                // self._world_size
+                // self.num_pipeline_stages
+            )
         assert not self.enable_offload, (
             "Offload not supported in AsyncMultiStepRolloutWorker"
         )
@@ -92,13 +93,18 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
             "finished_episodes should be initialized."
         )
         while True:
+            if self.async_use_local_env:
+                num_envs = self.local_num_train_envs
+            else:
+                num_envs = self.total_num_train_envs
+
             capacity = (
                 (self.staleness_threshold + self.version + 1)
-                * self.total_num_train_envs
+                * num_envs
                 * self.rollout_epoch
             )
             if (
-                self.finished_episodes + self.total_num_train_envs * self.rollout_epoch
+                self.finished_episodes + num_envs * self.rollout_epoch
                 <= capacity
             ):
                 break
