@@ -89,6 +89,12 @@ class PandaUMI(Panda):
         ]
 
     @property
+    def ee_pose_at_robot_base(self):
+        """Return the TCP pose expressed in the robot base frame."""
+        to_base = self.robot.pose.inv()
+        return to_base * self.tcp.pose
+
+    @property
     def _controller_configs(self):
         alignment_cfg = self._controller_alignment_cfg
         action_scale_cfg = alignment_cfg.get("action_scale", None)
