@@ -21,6 +21,8 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     BUTTON_POSE = sapien.Pose(p=[0.0, 0.0, 0.02], q=[0, 1, 0, 0])
     BUTTON_FORCE_THRESHOLD = 0.05
+    CLOSED_GRIPPER_QPOS = 0.0
+    CLOSED_GRIPPER_ACTION = -1.0
     OUTPUT_IMAGE_SIZE = 128
     TASK_DESCRIPTION = "reach the button target and press it"
     BUTTON_ASSET_DIR = (
@@ -36,6 +38,10 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
         self.button.set_pose(self.BUTTON_POSE)
+        qpos = self.agent.robot.get_qpos().clone()
+        qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
+        self.agent.reset(qpos)
+        self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
 
     def _get_button_contact_force(self) -> torch.Tensor:
         left_force = self.scene.get_pairwise_contact_forces(
@@ -190,7 +196,38 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
         return raw_obs, infos
 
+    def _append_closed_gripper_action(self, action):
+        if isinstance(action, torch.Tensor):
+            if action.shape[-1] == 7:
+                return action
+            if action.shape[-1] != 6:
+                raise ValueError(
+                    f"Expected action dim 6 or 7 for PushButtonEnv, got {action.shape}."
+                )
+            close_action = torch.full(
+                (*action.shape[:-1], 1),
+                self.CLOSED_GRIPPER_ACTION,
+                dtype=action.dtype,
+                device=action.device,
+            )
+            return torch.cat([action, close_action], dim=-1)
+
+        action_np = np.asarray(action)
+        if action_np.shape[-1] == 7:
+            return action_np
+        if action_np.shape[-1] != 6:
+            raise ValueError(
+                f"Expected action dim 6 or 7 for PushButtonEnv, got {action_np.shape}."
+            )
+        close_action = np.full(
+            (*action_np.shape[:-1], 1),
+            self.CLOSED_GRIPPER_ACTION,
+            dtype=action_np.dtype,
+        )
+        return np.concatenate([action_np, close_action], axis=-1)
+
     def step(self, action):
+        action = self._append_closed_gripper_action(action)
         raw_obs, reward, terminations, truncations, infos = super().step(action)
         infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
         return raw_obs, reward, terminations, truncations, infos
