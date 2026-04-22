@@ -66,10 +66,16 @@ class MultiStepRolloutWorker(Worker):
         self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
 
         self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False)
+        self.co_training_rollout_routing_mode = self.cfg.algorithm.get(
+            "co_training_rollout_routing_mode", "paired"
+        )
         self.async_use_local_env = False
 
         # TODO(liangzhi): recompute num envs
         if self.use_co_training:
+            assert self.co_training_rollout_routing_mode in ("paired", "single"), (
+                "Co-training only supports rollout routing modes 'paired' and 'single'."
+            )
             self.async_use_local_env = True
             self.real_total_num_train_envs = self.cfg.env.train.co_training_env_cfg.total_num_envs
             self.sim_total_num_train_envs = self.cfg.env.train.total_num_envs
@@ -78,25 +84,41 @@ class MultiStepRolloutWorker(Worker):
             self.real_total_num_eval_envs = self.cfg.env.eval.co_training_env_cfg.total_num_envs
             self.sim_total_num_eval_envs = self.cfg.env.eval.total_num_envs
             self.total_num_eval_envs = self.real_total_num_eval_envs + self.sim_total_num_eval_envs
-            
-            self.is_real_node = self._rank < self.cfg.env.train.co_training_env_cfg.num_workers
 
-            if self.is_real_node:
-                self.train_batch_size = (
-                    self.real_total_num_train_envs // self.cfg.env.train.co_training_env_cfg.num_workers // self.num_pipeline_stages
+            self.real_num_workers = self.cfg.env.train.co_training_env_cfg.num_workers
+            self.sim_num_workers = self.cfg.env.train.num_workers
+            self.co_training_train_env_rank_plan = self._build_co_training_env_rank_batch_plan(
+                mode="train"
+            )
+            self.co_training_eval_env_rank_plan = self._build_co_training_env_rank_batch_plan(
+                mode="eval"
+            )
+
+            rollout_world_size = self.placement.get_world_size("rollout")
+            env_world_size = self.placement.get_world_size("env")
+            assert env_world_size == len(self.co_training_train_env_rank_plan), (
+                "Co-training env rank plan size must match env worker world size."
+            )
+            if self.co_training_rollout_routing_mode == "paired":
+                assert rollout_world_size == env_world_size, (
+                    "Paired co-training requires env and rollout worker counts to match."
                 )
-                self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
-                self.eval_batch_size = (
-                    self.real_total_num_eval_envs // self.cfg.env.eval.co_training_env_cfg.num_workers // self.num_pipeline_stages
-                )
+                self.train_batch_size = self.co_training_train_env_rank_plan[self._rank][1]
+                self.eval_batch_size = self.co_training_eval_env_rank_plan[self._rank][1]
             else:
-                self.train_batch_size = (
-                    self.sim_total_num_train_envs // self.cfg.env.train.num_workers // self.num_pipeline_stages
+                assert rollout_world_size == 1, (
+                    "Single co-training routing requires exactly one rollout worker."
                 )
-                self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
-                self.eval_batch_size = (
-                    self.sim_total_num_eval_envs // self.cfg.env.eval.num_workers // self.num_pipeline_stages
+                assert self._rank == 0, (
+                    "Single co-training routing only supports rollout rank 0."
                 )
+                self.train_batch_size = sum(
+                    batch_size for _, batch_size in self.co_training_train_env_rank_plan
+                )
+                self.eval_batch_size = sum(
+                    batch_size for _, batch_size in self.co_training_eval_env_rank_plan
+                )
+            self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
         else:
             self.train_batch_size = (
                 self.total_num_train_envs // self._world_size // self.num_pipeline_stages
@@ -104,6 +126,7 @@ class MultiStepRolloutWorker(Worker):
             self.eval_batch_size = (
                 self.total_num_eval_envs // self._world_size // self.num_pipeline_stages
             )
+            self.local_num_train_envs = self.train_batch_size * self.num_pipeline_stages
         self.enable_cuda_graph = cfg.rollout.get("enable_cuda_graph", False)
         self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
 
@@ -164,12 +187,20 @@ class MultiStepRolloutWorker(Worker):
         if not self.cfg.runner.only_eval:
             # TODO(liangzhi): 强制一一对应
             if self.use_co_training:
-                self.dst_ranks = {
-                    "train": [(self._rank, self.train_batch_size)]
-                }
-                self.src_ranks = {
-                    "train": [(self._rank, self.train_batch_size)]
-                }
+                if self.co_training_rollout_routing_mode == "paired":
+                    self.dst_ranks = {
+                        "train": [(self._rank, self.train_batch_size)]
+                    }
+                    self.src_ranks = {
+                        "train": [(self._rank, self.train_batch_size)]
+                    }
+                else:
+                    self.dst_ranks = {
+                        "train": list(self.co_training_train_env_rank_plan)
+                    }
+                    self.src_ranks = {
+                        "train": list(self.co_training_train_env_rank_plan)
+                    }
             else:
                 self.dst_ranks = {
                     "train": self._setup_dst_ranks(
@@ -183,8 +214,12 @@ class MultiStepRolloutWorker(Worker):
                 }
         if self.enable_eval:
             if self.use_co_training:
-                self.dst_ranks["eval"]  = [(self._rank, self.eval_batch_size)]
-                self.src_ranks["eval"] = [(self._rank, self.eval_batch_size)]
+                if self.co_training_rollout_routing_mode == "paired":
+                    self.dst_ranks["eval"]  = [(self._rank, self.eval_batch_size)]
+                    self.src_ranks["eval"] = [(self._rank, self.eval_batch_size)]
+                else:
+                    self.dst_ranks["eval"] = list(self.co_training_eval_env_rank_plan)
+                    self.src_ranks["eval"] = list(self.co_training_eval_env_rank_plan)
             else:
                 self.dst_ranks["eval"] = self._setup_dst_ranks(
                     self.total_num_eval_envs // self.num_pipeline_stages
@@ -254,6 +289,38 @@ class MultiStepRolloutWorker(Worker):
             raise NotImplementedError(
                 f"Beta schedule {self._dagger_sampling_params['beta_schedule']} is not implemented"
             )
+
+    def _build_co_training_env_rank_batch_plan(
+        self, mode: Literal["train", "eval"]
+    ) -> list[tuple[int, int]]:
+        if mode == "train":
+            real_total_num_envs = self.real_total_num_train_envs
+            sim_total_num_envs = self.sim_total_num_train_envs
+            real_num_workers = self.cfg.env.train.co_training_env_cfg.num_workers
+            sim_num_workers = self.cfg.env.train.num_workers
+        else:
+            real_total_num_envs = self.real_total_num_eval_envs
+            sim_total_num_envs = self.sim_total_num_eval_envs
+            real_num_workers = self.cfg.env.eval.co_training_env_cfg.num_workers
+            sim_num_workers = self.cfg.env.eval.num_workers
+
+        rank_batch_plan: list[tuple[int, int]] = []
+        for env_rank in range(real_num_workers):
+            rank_batch_plan.append(
+                (
+                    env_rank,
+                    real_total_num_envs // real_num_workers // self.num_pipeline_stages,
+                )
+            )
+        for sim_local_rank in range(sim_num_workers):
+            env_rank = real_num_workers + sim_local_rank
+            rank_batch_plan.append(
+                (
+                    env_rank,
+                    sim_total_num_envs // sim_num_workers // self.num_pipeline_stages,
+                )
+            )
+        return rank_batch_plan
 
     def _setup_dst_ranks(self, batch_size: int) -> list[tuple[int, int]]:
         """Compute env peer ranks for this rollout worker.

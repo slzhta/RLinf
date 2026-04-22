@@ -23,10 +23,10 @@ cluster:
       placement: 0
     env:
       node_group: "real,sim"
-      placement: 0-3
+      placement: 0-1
     rollout:
       node_group: "sim"
-      placement: 0-3
+      placement: 0
   node_groups:
     - label: "sim"
       node_ranks: 0
@@ -58,6 +58,7 @@ runner:
 
 algorithm:
   sim_real_rl_co_training: True
+  co_training_rollout_routing_mode: single
   normalize_advantages: True
   kl_penalty: kl
   group_size: 1
@@ -108,8 +109,8 @@ env:
   group_name: "EnvGroup"
 
   train:
-    total_num_envs: 64
-    num_workers: 3
+    total_num_envs: 16
+    num_workers: 1
     ignore_terminations: True
     override_cfg:
       is_dummy: False
@@ -127,8 +128,8 @@ env:
         target_ee_pose: TARGET_EE_POSE
 
   eval:
-    total_num_envs: 64
-    num_workers: 3
+    total_num_envs: 8
+    num_workers: 1
     co_training_env_cfg: # TODO(liangzhi): same, and override is wrong
       total_num_envs: 1
       num_workers: 1

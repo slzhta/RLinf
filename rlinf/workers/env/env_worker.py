@@ -99,11 +99,28 @@ class EnvWorker(Worker):
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         self.use_co_training = self.cfg.algorithm.get("sim_real_rl_co_training", False) # TODO(liangzhi): check this
+        self.co_training_rollout_routing_mode = self.cfg.algorithm.get(
+            "co_training_rollout_routing_mode", "paired"
+        )
         self.co_training_real_num_workers = (
             self.cfg.env.train.co_training_env_cfg.num_workers
             if self.use_co_training
             else 0
         )
+        if self.use_co_training:
+            assert self.co_training_rollout_routing_mode in ("paired", "single"), (
+                "Co-training only supports rollout routing modes 'paired' and 'single'."
+            )
+            rollout_world_size = self._component_placement.get_world_size("rollout")
+            env_world_size = self._component_placement.get_world_size("env")
+            if self.co_training_rollout_routing_mode == "paired":
+                assert env_world_size == rollout_world_size, (
+                    "Paired co-training requires env and rollout worker counts to match."
+                )
+            else:
+                assert rollout_world_size == 1, (
+                    "Single co-training routing requires exactly one rollout worker."
+                )
         if not self.only_eval:
             # TODO(liangzhi): Here for adding two env config
             if self.use_co_training:
@@ -343,8 +360,9 @@ class EnvWorker(Worker):
             if self.use_co_training:
                 assert (self.cfg.get("reward", {}).get("use_reward_model", False) is False), "not support reward model for co-training!"
                 # TODO(liangzhi): 使用一一映射的方式
+                rollout_dst_rank = self._rank if self.co_training_rollout_routing_mode == "paired" else 0
                 dst_rank_map = {
-                    "rollout_train": [(self._rank, self.train_num_envs_per_stage)],
+                    "rollout_train": [(rollout_dst_rank, self.train_num_envs_per_stage)],
                 }
             else:
                 dst_rank_map = {
@@ -374,9 +392,10 @@ class EnvWorker(Worker):
 
         if self.enable_eval:
             if self.use_co_training:
+                rollout_dst_rank = self._rank if self.co_training_rollout_routing_mode == "paired" else 0
                 dst_rank_map.update(
                     {
-                        "rollout_eval": [(self._rank, self.eval_num_envs_per_stage)],
+                        "rollout_eval": [(rollout_dst_rank, self.eval_num_envs_per_stage)],
                     }
                 )
             else:
@@ -409,8 +428,9 @@ class EnvWorker(Worker):
             if self.use_co_training:
                 assert (self.cfg.get("reward", {}).get("use_reward_model", False) is False), "not support reward model for co-training!"
                 # TODO(liangzhi): 使用一一映射的方式
+                rollout_src_rank = self._rank if self.co_training_rollout_routing_mode == "paired" else 0
                 src_rank_map = {
-                    "rollout_train": [(self._rank, self.train_num_envs_per_stage)],
+                    "rollout_train": [(rollout_src_rank, self.train_num_envs_per_stage)],
                 }
             else:
                 src_rank_map = {
@@ -439,9 +459,10 @@ class EnvWorker(Worker):
                     )
         if self.enable_eval:
             if self.use_co_training:
+                rollout_src_rank = self._rank if self.co_training_rollout_routing_mode == "paired" else 0
                 src_rank_map.update(
                     {
-                        "rollout_eval": [(self._rank, self.eval_num_envs_per_stage)],
+                        "rollout_eval": [(rollout_src_rank, self.eval_num_envs_per_stage)],
                     }
                 )
             else:
