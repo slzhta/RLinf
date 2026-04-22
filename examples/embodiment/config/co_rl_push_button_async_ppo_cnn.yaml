@@ -35,7 +35,7 @@ cluster:
       hardware:
         type: Franka
         configs:
-          - robot_ip: ROBOT_IP
+          - robot_ip: 192.168.1.2
             node_rank: 1
 
 runner:
@@ -125,7 +125,7 @@ env:
         use_dense_reward: True
         reward_scale: 0.02
         max_num_steps: 50
-        target_ee_pose: TARGET_EE_POSE
+        target_ee_pose: [0.6830848, 0.04919736, -0.00852352,  3.02009191, -0.04776353, -0.02423444]
 
   eval:
     total_num_envs: 8
