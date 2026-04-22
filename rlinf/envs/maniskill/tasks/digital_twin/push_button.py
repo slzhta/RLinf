@@ -22,6 +22,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     BUTTON_POSE = sapien.Pose(p=[0.0, 0.0, 0.02], q=[0, 1, 0, 0])
     BUTTON_FORCE_THRESHOLD = 0.05
     OUTPUT_IMAGE_SIZE = 128
+    TASK_DESCRIPTION = "reach the button target and press it"
     BUTTON_ASSET_DIR = (
         Path(__file__).resolve().parent / "assets" / "objects" / "button"
     )
@@ -147,6 +148,9 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         ).to(gripper_state.device, dtype=torch.float32)
         extracted_obs["states"] = torch.cat([pos, euler, gripper_state], dim=1)
         return extracted_obs
+
+    def get_language_instruction(self) -> list[str]:
+        return [self.TASK_DESCRIPTION] * self.num_envs
 
     def _pad_and_resize_images(self, images: torch.Tensor) -> torch.Tensor:
         if images.dim() != 4:
