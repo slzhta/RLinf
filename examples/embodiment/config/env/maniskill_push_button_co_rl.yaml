@@ -36,7 +36,6 @@ init_params:
     shader_pack: "default"
   render_mode: rgb_array
   reward_mode: normalized_dense
-  use_sparse_reward: true
   domain_randomization:
     enabled: false
     randomize_lighting: false
