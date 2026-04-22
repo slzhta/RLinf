@@ -855,11 +855,22 @@ def validate_embodied_cfg(cfg):
                 else:
                     raise NotImplementedError(f"Robot {robot} not supported")
 
-            cfg.env.train.init_params.control_mode = get_robot_control_mode(
-                cfg.actor.model.policy_setup
+            def maybe_keep_configured_control_mode(env_cfg):
+                use_config_control_mode = env_cfg.get("use_config_control_mode", False)
+                if use_config_control_mode:
+                    configured_control_mode = env_cfg.init_params.get("control_mode", None)
+                    assert configured_control_mode not in (None, "none"), (
+                        "env.init_params.control_mode must be explicitly set when "
+                        "env.use_config_control_mode is enabled."
+                    )
+                    return configured_control_mode
+                return get_robot_control_mode(cfg.actor.model.policy_setup)
+
+            cfg.env.train.init_params.control_mode = maybe_keep_configured_control_mode(
+                cfg.env.train
             )
-            cfg.env.eval.init_params.control_mode = get_robot_control_mode(
-                cfg.actor.model.policy_setup
+            cfg.env.eval.init_params.control_mode = maybe_keep_configured_control_mode(
+                cfg.env.eval
             )
         elif (
             SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.BEHAVIOR

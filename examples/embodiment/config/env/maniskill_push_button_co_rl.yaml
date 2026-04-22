@@ -14,6 +14,7 @@ max_episode_steps: 100 # max episode steps for truncation
 reward_mode: raw
 wrap_obs_mode: raw
 include_states_in_obs: False
+use_config_control_mode: True
 
 enable_offload: False
 
