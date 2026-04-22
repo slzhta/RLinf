@@ -58,9 +58,6 @@ from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
     DigitalTwinBaseEnv,
 )
 from rlinf.envs.maniskill.tasks.digital_twin.push_button import PushButtonEnv
-from rlinf.envs.maniskill.tasks.digital_twin.push_button_dr import (
-    PushButtonDomainRandomizedEnv,
-)
 
 __all__ = [
     "DIGITAL_TWIN_BACKGROUND_IMAGES",
@@ -69,5 +66,4 @@ __all__ = [
     "PANDA_UMI_CAMERA_SETTINGS",
     "PANDA_UMI_REFERENCE_QPOS",
     "PushButtonEnv",
-    "PushButtonDomainRandomizedEnv",
 ]
