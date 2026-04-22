@@ -2,9 +2,9 @@
 import sapien
 import numpy as np
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
-from mani_skill import PACKAGE_ASSET_DIR
 from mani_skill.agents.controllers import deepcopy_dict
 from mani_skill.agents.registration import register_agent
 from mani_skill.agents.robots.panda.panda import Panda
@@ -43,7 +43,9 @@ class PandaUMI(Panda):
     """Panda arm robot with the real sense camera attached to gripper"""
 
     uid = "panda_umi"
-    urdf_path = f"{PACKAGE_ASSET_DIR}/robots/panda/panda_umi.urdf"
+    urdf_path = str(
+        Path(__file__).resolve().parents[1] / "assets" / "robots" / "panda_umi.urdf"
+    )
 
     # Franka-aligned action semantics: action is clipped to [-1, 1], then scaled.
     action_scale = [0.1, 0.1, 1.0]  # [xyz_scale, rpy_scale, gripper_scale]
