@@ -148,7 +148,7 @@ rollout:
   sync_weight_nccl_max_ctas: 32
 
   model:
-    model_path: "/mnt/Rlinf"
+    model_path: "/mnt/RLinf"
     precision: ${actor.model.precision}
     num_q_heads: 10
 
@@ -165,7 +165,7 @@ actor:
   enable_offload: False
 
   model:
-    model_path: "/mnt/Rlinf"
+    model_path: "/mnt/RLinf"
     add_value_head: True
     add_q_head: False
     use_state: False
