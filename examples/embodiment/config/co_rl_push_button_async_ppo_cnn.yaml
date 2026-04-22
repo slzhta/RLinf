@@ -155,8 +155,8 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  micro_batch_size: 500
-  global_batch_size: 500
+  micro_batch_size: 850
+  global_batch_size: 850
   seed: 1234
   enable_offload: False
 
