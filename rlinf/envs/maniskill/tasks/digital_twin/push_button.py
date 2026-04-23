@@ -9,6 +9,7 @@ from sapien.physx import PhysxMaterial
 from transforms3d.euler import mat2euler
 
 from mani_skill.utils.registration import register_env
+from mani_skill.utils.structs.pose import Pose
 
 from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
     DigitalTwinBaseEnv,
@@ -25,6 +26,10 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     CLOSED_GRIPPER_ACTION = -1.0
     OUTPUT_IMAGE_SIZE = 128
     TASK_DESCRIPTION = "reach the button target and press it"
+    SUCCESS_TARGET_Z_OFFSET = 0.10
+    SUCCESS_POSITION_THRESHOLD = 0.015
+    DENSE_REWARD_DECAY = 500.0
+    DEFAULT_BUTTON_RANDOM_XY_RANGE = 0.10
     BUTTON_ASSET_DIR = (
         Path(__file__).resolve().parent / "assets" / "objects" / "button"
     )
@@ -37,7 +42,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
-        self.button.set_pose(self.BUTTON_POSE)
+        self.button.set_pose(self._sample_button_pose(env_idx))
         qpos = self.agent.robot.get_qpos().clone()
         joint_reset_qpos = self._get_joint_reset_qpos(device=qpos.device, dtype=qpos.dtype)
         if joint_reset_qpos is not None:
@@ -64,6 +69,38 @@ class PushButtonEnv(DigitalTwinBaseEnv):
             )
         return joint_reset_qpos
 
+    def _sample_button_pose(self, env_idx: torch.Tensor) -> Pose:
+        button_pose = self.task_alignment.get("button_initial_pose", None)
+        if button_pose is None:
+            button_pose = np.hstack([self.BUTTON_POSE.p, self.BUTTON_POSE.q])
+        button_pose = np.asarray(button_pose, dtype=np.float32).reshape(-1)
+        if button_pose.size != 7:
+            raise ValueError(
+                "task_alignment.button_initial_pose must contain 7 values [x, y, z, qx, qy, qz, qw]."
+            )
+
+        b = len(env_idx)
+        position = np.repeat(button_pose[:3][None, :], b, axis=0)
+        random_xy_range = float(
+            self.task_alignment.get(
+                "button_random_xy_range", self.DEFAULT_BUTTON_RANDOM_XY_RANGE
+            )
+        )
+        xy_offset = self._batched_episode_rng[env_idx].uniform(
+            -random_xy_range, random_xy_range, size=(2,)
+        )
+        position[:, :2] += xy_offset
+        quat = np.repeat(button_pose[3:][None, :], b, axis=0)
+        return Pose.create_from_pq(
+            p=torch.as_tensor(position, device=self.device, dtype=torch.float32),
+            q=torch.as_tensor(quat, device=self.device, dtype=torch.float32),
+        )
+
+    def _get_button_target_position(self) -> torch.Tensor:
+        target_position = self.button.pose.p.clone()
+        target_position[:, 2] += self.SUCCESS_TARGET_Z_OFFSET
+        return target_position
+
     def _get_button_contact_force(self) -> torch.Tensor:
         left_force = self.scene.get_pairwise_contact_forces(
             self.agent.finger1_link, self.button
@@ -75,12 +112,22 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         return torch.linalg.norm(total_force, axis=1)
 
     def evaluate(self):
+        target_position = self._get_button_target_position()
+        tcp_position = self.agent.tcp.pose.p
+        target_delta = torch.abs(tcp_position - target_position)
         button_contact_force = self._get_button_contact_force()
         is_button_pressed = button_contact_force > self.BUTTON_FORCE_THRESHOLD
+        success = torch.all(
+            target_delta
+            <= torch.full_like(target_delta, self.SUCCESS_POSITION_THRESHOLD),
+            dim=1,
+        )
         return {
             "button_contact_force": button_contact_force,
             "is_button_pressed": is_button_pressed,
-            "success": is_button_pressed.clone(),
+            "button_target_position": target_position,
+            "target_delta": target_delta,
+            "success": success,
         }
 
     def _get_obs_extra(self, info: dict):
@@ -94,18 +141,37 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         return obs
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        tcp_to_button_dist = torch.linalg.norm(
-            self.agent.tcp.pose.p - self.button.pose.p, axis=1
+        target_delta = info["target_delta"]
+        use_dense_reward = bool(self.task_alignment.get("use_dense_reward", False))
+        reward_scale = float(self.task_alignment.get("reward_scale", 1.0))
+        return self._compute_aligned_reward(
+            target_delta=target_delta,
+            success=info["success"],
+            use_dense_reward=use_dense_reward,
+            reward_scale=reward_scale,
+            dense_reward_decay=self.DENSE_REWARD_DECAY,
         )
-        reward = 1.0 - torch.tanh(5.0 * tcp_to_button_dist)
-        reward += torch.clamp(info["button_contact_force"], max=1.0)
-        reward[info["success"]] = 3.0
-        return reward
 
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 3.0
+        return self.compute_dense_reward(obs=obs, action=action, info=info)
+
+    @staticmethod
+    def _compute_aligned_reward(
+        target_delta: torch.Tensor,
+        success: torch.Tensor,
+        use_dense_reward: bool,
+        reward_scale: float,
+        dense_reward_decay: float,
+    ) -> torch.Tensor:
+        squared_position_error = torch.sum(torch.square(target_delta), dim=1)
+        dense_reward = torch.exp(-dense_reward_decay * squared_position_error)
+        reward = torch.zeros_like(dense_reward)
+        if use_dense_reward:
+            reward = dense_reward
+        reward[success] = 1.0
+        return reward * reward_scale
 
     def _build_button(self):
         collision_filename = self.BUTTON_ASSET_DIR / "mesh_w_vertex_color_abs.ply"

@@ -36,7 +36,7 @@ init_params:
   sensor_configs:
     shader_pack: "default"
   render_mode: rgb_array
-  reward_mode: normalized_dense
+  reward_mode: dense
   domain_randomization:
     enabled: false
     randomize_lighting: false
