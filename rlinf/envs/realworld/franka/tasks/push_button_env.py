@@ -16,8 +16,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from rlinf.utils.logging import get_logger
-
 from .co_training_base_env import FrankaCoTrainingBaseConfig, FrankaCoTrainingBaseEnv
 
 
@@ -37,15 +35,5 @@ class FrankaPushButtonConfig(FrankaCoTrainingBaseConfig):
 class FrankaPushButtonEnv(FrankaCoTrainingBaseEnv):
     CONFIG_CLS = FrankaPushButtonConfig
 
-    def __init__(self, override_cfg, worker_info=None, hardware_info=None, env_idx=0):
-        super().__init__(override_cfg, worker_info, hardware_info, env_idx)
-        self._joint_reset_warning_emitted = False
-
     def reset(self, joint_reset=False, **kwargs):
-        if not joint_reset and not self._joint_reset_warning_emitted:
-            get_logger().warning(
-                "FrankaPushButtonEnv is using EE-pose reset by default. "
-                "Joint reset is only applied when explicitly requested or when the periodic joint reset cycle triggers."
-            )
-            self._joint_reset_warning_emitted = True
         return super().reset(joint_reset=joint_reset, **kwargs)

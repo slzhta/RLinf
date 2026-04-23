@@ -39,9 +39,30 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         super()._initialize_episode(env_idx, options)
         self.button.set_pose(self.BUTTON_POSE)
         qpos = self.agent.robot.get_qpos().clone()
+        joint_reset_qpos = self._get_joint_reset_qpos(device=qpos.device, dtype=qpos.dtype)
+        if joint_reset_qpos is not None:
+            qpos[env_idx, : joint_reset_qpos.shape[0]] = joint_reset_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
         self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
+
+    def _get_joint_reset_qpos(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor | None:
+        joint_reset_qpos = self.reset_alignment.get("joint_reset_qpos", None)
+        if joint_reset_qpos is None:
+            return None
+
+        joint_reset_qpos = torch.as_tensor(
+            joint_reset_qpos,
+            device=device,
+            dtype=dtype,
+        ).reshape(-1)
+        if joint_reset_qpos.numel() != 7:
+            raise ValueError(
+                "reset_alignment.joint_reset_qpos must contain exactly 7 arm joint values."
+            )
+        return joint_reset_qpos
 
     def _get_button_contact_force(self) -> torch.Tensor:
         left_force = self.scene.get_pairwise_contact_forces(

@@ -56,6 +56,7 @@ class DigitalTwinBaseEnv(BaseEnv):
         robot_init_qpos_noise=0.02,
         overwrite_rgb_in_obs: bool = True,
         controller_alignment: dict[str, Any] | None = None,
+        reset_alignment: dict[str, Any] | None = None,
         domain_randomization: bool | dict[str, Any] | None = None,
         randomize_lighting: bool | None = None,
         randomize_joint_control: bool | None = None,
@@ -81,6 +82,7 @@ class DigitalTwinBaseEnv(BaseEnv):
         self.controller_alignment = self._normalize_controller_alignment_arg(
             controller_alignment
         )
+        self.reset_alignment = self._normalize_reset_alignment_arg(reset_alignment)
 
         domain_randomization_flag, domain_randomization_inline = (
             self._normalize_domain_randomization_arg(domain_randomization)
@@ -398,6 +400,16 @@ class DigitalTwinBaseEnv(BaseEnv):
                 "controller_alignment must be a mapping of controller settings"
             )
         return dict(controller_alignment)
+
+    def _normalize_reset_alignment_arg(
+        self,
+        reset_alignment: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if reset_alignment is None:
+            return {}
+        if not isinstance(reset_alignment, dict):
+            raise TypeError("reset_alignment must be a mapping of reset settings")
+        return dict(reset_alignment)
 
     def _infer_master_domain_randomization_toggle(
         self, config: dict[str, Any]

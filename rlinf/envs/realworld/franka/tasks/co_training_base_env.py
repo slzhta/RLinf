@@ -237,7 +237,26 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
         else:
             raise ValueError(f"Task id {self.task_id} should be 0 or 1")
 
-        return super().reset(joint_reset)
+        if self.config.is_dummy:
+            observation = self._get_observation()
+            return observation, {}
+
+        self._success_hold_counter = 0
+        self._controller.reconfigure_compliance_params(
+            self.config.compliance_param
+        ).wait()
+
+        self.go_to_rest(joint_reset=True)
+
+        self._clear_error()
+        self._num_steps = 0
+        self._franka_state = self._controller.get_state().wait()[0]
+        observation = self._get_observation()
+
+        if getattr(self.config, "use_target_controller", False):
+            self._target_pose = self._franka_state.tcp_pose.copy()
+
+        return observation, {}
 
     def go_to_rest(self, joint_reset=False):
         """
