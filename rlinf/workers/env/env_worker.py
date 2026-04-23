@@ -253,7 +253,6 @@ class EnvWorker(Worker):
                 setattr(self.cfg.env.train, "override_cfg", OmegaConf.create(base_cfg))
 
         self._inject_sim_real_alignment_cfg(self.cfg.env.train)
-        self._inject_sim_real_reset_cfg(self.cfg.env.train)
         self._inject_sim_real_reward_cfg(self.cfg.env.train)
         self._inject_realworld_reward_cfg(self.cfg.env.train)
 
@@ -275,7 +274,6 @@ class EnvWorker(Worker):
             setattr(self.cfg.env.eval, "override_cfg", OmegaConf.create(base_eval_cfg))
 
         self._inject_sim_real_alignment_cfg(self.cfg.env.eval)
-        self._inject_sim_real_reset_cfg(self.cfg.env.eval)
         self._inject_sim_real_reward_cfg(self.cfg.env.eval)
         self._inject_realworld_reward_cfg(self.cfg.env.eval)
 
@@ -315,39 +313,6 @@ class EnvWorker(Worker):
             )
             merged_override_cfg = update_nested_cfg({}, override_cfg)
             merged_override_cfg = update_nested_cfg(merged_override_cfg, controller_cfg)
-            setattr(env_cfg, "override_cfg", OmegaConf.create(merged_override_cfg))
-
-    def _inject_sim_real_reset_cfg(self, env_cfg: DictConfig):
-        alignment_cfg = self.cfg.env.get("sim_real_alignment", None)
-        if alignment_cfg is None:
-            return
-
-        reset_cfg = OmegaConf.to_container(
-            alignment_cfg.get("reset", OmegaConf.create({})),
-            resolve=True,
-        )
-        if not reset_cfg:
-            return
-
-        if env_cfg.env_type == "maniskill":
-            init_params = OmegaConf.to_container(
-                env_cfg.get("init_params", OmegaConf.create({})),
-                resolve=True,
-            )
-            existing_reset_cfg = init_params.get("reset_alignment", {})
-            merged_reset_cfg = update_nested_cfg({}, existing_reset_cfg)
-            merged_reset_cfg = update_nested_cfg(merged_reset_cfg, reset_cfg)
-            init_params["reset_alignment"] = merged_reset_cfg
-            setattr(env_cfg, "init_params", OmegaConf.create(init_params))
-            return
-
-        if env_cfg.env_type == "realworld":
-            override_cfg = OmegaConf.to_container(
-                env_cfg.get("override_cfg", OmegaConf.create({})),
-                resolve=True,
-            )
-            merged_override_cfg = update_nested_cfg({}, override_cfg)
-            merged_override_cfg = update_nested_cfg(merged_override_cfg, reset_cfg)
             setattr(env_cfg, "override_cfg", OmegaConf.create(merged_override_cfg))
 
     def _inject_sim_real_reward_cfg(self, env_cfg: DictConfig):

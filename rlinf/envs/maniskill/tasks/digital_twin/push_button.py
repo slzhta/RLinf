@@ -9,6 +9,10 @@ from sapien.physx import PhysxMaterial
 from transforms3d.euler import mat2euler
 
 from mani_skill.utils.registration import register_env
+from mani_skill.utils.geometry.rotation_conversions import (
+    euler_angles_to_matrix,
+    matrix_to_quaternion,
+)
 from mani_skill.utils.structs.pose import Pose
 
 from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
@@ -30,6 +34,8 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     SUCCESS_POSITION_THRESHOLD = 0.015
     DENSE_REWARD_DECAY = 500.0
     DEFAULT_BUTTON_RANDOM_XY_RANGE = 0.10
+    DEFAULT_RESET_RANDOM_XY_RANGE = 0.01
+    DEFAULT_RESET_RANDOM_RZ_RANGE = np.pi / 9
     BUTTON_ASSET_DIR = (
         Path(__file__).resolve().parent / "assets" / "objects" / "button"
     )
@@ -44,30 +50,133 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         super()._initialize_episode(env_idx, options)
         self.button.set_pose(self._sample_button_pose(env_idx))
         qpos = self.agent.robot.get_qpos().clone()
-        joint_reset_qpos = self._get_joint_reset_qpos(device=qpos.device, dtype=qpos.dtype)
-        if joint_reset_qpos is not None:
-            qpos[env_idx, : joint_reset_qpos.shape[0]] = joint_reset_qpos
+        reset_ee_pose = self._sample_reset_ee_pose(
+            env_idx=env_idx,
+            device=qpos.device,
+            dtype=qpos.dtype,
+        )
+        ik_qpos = self._solve_arm_ik_qpos(
+            target_pose=reset_ee_pose,
+            seed_qpos=qpos[env_idx],
+            env_idx=env_idx,
+            device=qpos.device,
+            dtype=qpos.dtype,
+        )
+        qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
         self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
 
-    def _get_joint_reset_qpos(
-        self, device: torch.device, dtype: torch.dtype
-    ) -> torch.Tensor | None:
-        joint_reset_qpos = self.reset_alignment.get("joint_reset_qpos", None)
-        if joint_reset_qpos is None:
+    def _sample_reset_ee_pose(
+        self, env_idx: torch.Tensor, device: torch.device, dtype: torch.dtype
+    ) -> Pose:
+        controller_cfg = self.controller_alignment
+
+        target_ee_pose = np.asarray(
+            controller_cfg.get(
+                "target_ee_pose",
+                [0.5, 0.0, 0.1, -3.14, 0.0, 0.0],
+            ),
+            dtype=np.float32,
+        ).reshape(-1)
+        if target_ee_pose.size != 6:
+            raise ValueError(
+                "controller_alignment.target_ee_pose must contain 6 values [x, y, z, rx, ry, rz]."
+            )
+
+        reset_ee_pose_cfg = controller_cfg.get("reset_ee_pose", None)
+        if reset_ee_pose_cfg is not None:
+            reset_ee_pose = np.asarray(reset_ee_pose_cfg, dtype=np.float32).reshape(-1)
+            if reset_ee_pose.size != 6:
+                raise ValueError(
+                    "controller_alignment.reset_ee_pose must contain 6 values [x, y, z, rx, ry, rz]."
+                )
+        else:
+            clip_z_range_high = float(controller_cfg.get("clip_z_range_high", 0.3))
+            clip_z_range_low = float(controller_cfg.get("clip_z_range_low", 0.001))
+            reset_ee_pose = target_ee_pose.copy()
+            reset_ee_pose[2] += 0.5 * (clip_z_range_high + clip_z_range_low)
+
+        b = len(env_idx)
+        position = np.repeat(reset_ee_pose[:3][None, :], b, axis=0)
+        euler = np.repeat(reset_ee_pose[3:][None, :], b, axis=0)
+
+        enable_random_reset = bool(controller_cfg.get("enable_random_reset", True))
+        random_xy_range = float(
+            controller_cfg.get("random_xy_range", self.DEFAULT_RESET_RANDOM_XY_RANGE)
+        )
+        random_rz_range = float(
+            controller_cfg.get("random_rz_range", self.DEFAULT_RESET_RANDOM_RZ_RANGE)
+        )
+        target_rz = float(target_ee_pose[5])
+
+        if enable_random_reset:
+            for i, scene_idx_t in enumerate(env_idx):
+                scene_idx = int(scene_idx_t.item())
+                rng = self._batched_episode_rng[scene_idx]
+                position[i, :2] += rng.uniform(
+                    -random_xy_range, random_xy_range, size=(2,)
+                )
+                euler[i, 2] = target_rz + rng.uniform(-random_rz_range, random_rz_range)
+        else:
+            euler[:, 2] = target_rz
+
+        position_t = torch.as_tensor(position, device=device, dtype=dtype)
+        euler_t = torch.as_tensor(euler, device=device, dtype=dtype)
+        quat_t = matrix_to_quaternion(euler_angles_to_matrix(euler_t, "XYZ")).to(
+            device=device, dtype=dtype
+        )
+        return Pose.create_from_pq(p=position_t, q=quat_t)
+
+    def _solve_arm_ik_qpos(
+        self,
+        target_pose: Pose,
+        seed_qpos: torch.Tensor,
+        env_idx: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        arm_controller = self._get_arm_controller()
+        if arm_controller is None:
+            raise RuntimeError("Cannot find arm controller for IK during reset.")
+        kinematics = getattr(arm_controller, "kinematics", None)
+        if kinematics is None or not hasattr(kinematics, "compute_ik"):
+            raise RuntimeError("Arm controller has no kinematics.compute_ik API.")
+
+        current_pose = self.agent.ee_pose_at_robot_base[env_idx]
+        q0 = seed_qpos
+
+        ik_qpos = kinematics.compute_ik(
+            pose=target_pose,
+            q0=q0,
+            is_delta_pose=False,
+            current_pose=current_pose,
+            solver_config=arm_controller.config.delta_solver_config,
+        )
+        if ik_qpos is None:
+            return seed_qpos[:, :7]
+
+        ik_qpos = torch.as_tensor(ik_qpos, device=device, dtype=dtype)
+        if ik_qpos.ndim == 1:
+            ik_qpos = ik_qpos.unsqueeze(0)
+        if ik_qpos.shape[0] == 1 and seed_qpos.shape[0] > 1:
+            ik_qpos = ik_qpos.repeat(seed_qpos.shape[0], 1)
+        if ik_qpos.shape[1] < 7:
+            raise RuntimeError(
+                f"IK result has invalid shape {tuple(ik_qpos.shape)}, expected at least 7 joints."
+            )
+        return ik_qpos[:, :7]
+
+    def _get_arm_controller(self):
+        controller = getattr(self.agent, "controller", None)
+        if controller is None:
             return None
 
-        joint_reset_qpos = torch.as_tensor(
-            joint_reset_qpos,
-            device=device,
-            dtype=dtype,
-        ).reshape(-1)
-        if joint_reset_qpos.numel() != 7:
-            raise ValueError(
-                "reset_alignment.joint_reset_qpos must contain exactly 7 arm joint values."
-            )
-        return joint_reset_qpos
+        controllers = getattr(controller, "controllers", None)
+        if isinstance(controllers, dict) and "arm" in controllers:
+            return controllers["arm"]
+
+        return None
 
     def _sample_button_pose(self, env_idx: torch.Tensor) -> Pose:
         button_pose = self.task_alignment.get("button_initial_pose", None)

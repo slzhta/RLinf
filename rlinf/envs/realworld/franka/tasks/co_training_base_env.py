@@ -105,7 +105,6 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
 
     def __init__(self, override_cfg, worker_info=None, hardware_info=None, env_idx=0):
         super().__init__(override_cfg, worker_info, hardware_info, env_idx)
-        self._has_finished_initial_reset = False
         self.task_id = 0  # 0 for forward task, 1 for backward task
         """
         the inner safety box is used to prevent the gripper from hitting the two walls of the bins in the center.
@@ -237,29 +236,7 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
             self._reset_pose[1] = self.config.target_ee_pose[1] - 0.1
         else:
             raise ValueError(f"Task id {self.task_id} should be 0 or 1")
-
-        if self.config.is_dummy:
-            observation = self._get_observation()
-            return observation, {}
-
-        self._success_hold_counter = 0
-        self._controller.reconfigure_compliance_params(
-            self.config.compliance_param
-        ).wait()
-
-        should_joint_reset = self._has_finished_initial_reset
-        self.go_to_rest(joint_reset=should_joint_reset)
-        self._has_finished_initial_reset = True
-
-        self._clear_error()
-        self._num_steps = 0
-        self._franka_state = self._controller.get_state().wait()[0]
-        observation = self._get_observation()
-
-        if getattr(self.config, "use_target_controller", False):
-            self._target_pose = self._franka_state.tcp_pose.copy()
-
-        return observation, {}
+        return super().reset(joint_reset)
 
     def go_to_rest(self, joint_reset=False):
         """
