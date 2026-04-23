@@ -789,6 +789,4 @@ class DigitalTwinBaseEnv(BaseEnv):
         else:
             action = action.to(self.device)
         
-        
-        
         return super().step(action)

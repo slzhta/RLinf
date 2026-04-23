@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 from collections import defaultdict
 from typing import Any, Literal
 
@@ -251,6 +252,7 @@ class EnvWorker(Worker):
                 base_cfg = update_nested_cfg(base_cfg, override_cfg)
                 setattr(self.cfg.env.train, "override_cfg", OmegaConf.create(base_cfg))
 
+        self._inject_sim_real_alignment_cfg(self.cfg.env.train)
         self._inject_realworld_reward_cfg(self.cfg.env.train)
 
         eval_override_cfgs = self.cfg.env.eval.get("override_cfgs", None)
@@ -270,7 +272,114 @@ class EnvWorker(Worker):
             base_eval_cfg = update_nested_cfg(base_eval_cfg, eval_override_cfg)
             setattr(self.cfg.env.eval, "override_cfg", OmegaConf.create(base_eval_cfg))
 
+        self._inject_sim_real_alignment_cfg(self.cfg.env.eval)
         self._inject_realworld_reward_cfg(self.cfg.env.eval)
+
+    def _inject_sim_real_alignment_cfg(self, env_cfg: DictConfig):
+        alignment_cfg = self.cfg.env.get("sim_real_alignment", None)
+        if alignment_cfg is None:
+            return
+
+        controller_cfg = OmegaConf.to_container(
+            alignment_cfg.get("controller", OmegaConf.create({})),
+            resolve=True,
+        )
+        if not controller_cfg:
+            return
+
+        if env_cfg.env_type == "maniskill":
+            translated_controller_cfg = self._translate_alignment_for_maniskill(
+                controller_cfg
+            )
+            init_params = OmegaConf.to_container(
+                env_cfg.get("init_params", OmegaConf.create({})),
+                resolve=True,
+            )
+            existing_controller_cfg = init_params.get("controller_alignment", {})
+            merged_controller_cfg = update_nested_cfg({}, existing_controller_cfg)
+            merged_controller_cfg = update_nested_cfg(
+                merged_controller_cfg, translated_controller_cfg
+            )
+            init_params["controller_alignment"] = merged_controller_cfg
+            setattr(env_cfg, "init_params", OmegaConf.create(init_params))
+            return
+
+        if env_cfg.env_type == "realworld":
+            override_cfg = OmegaConf.to_container(
+                env_cfg.get("override_cfg", OmegaConf.create({})),
+                resolve=True,
+            )
+            merged_override_cfg = update_nested_cfg({}, override_cfg)
+            merged_override_cfg = update_nested_cfg(merged_override_cfg, controller_cfg)
+            setattr(env_cfg, "override_cfg", OmegaConf.create(merged_override_cfg))
+
+    def _translate_alignment_for_maniskill(
+        self, controller_cfg: dict[str, Any]
+    ) -> dict[str, Any]:
+        translated_cfg = copy.deepcopy(controller_cfg)
+
+        target_ee_pose = translated_cfg.get("target_ee_pose", None)
+        clip_x_range = translated_cfg.get("clip_x_range", None)
+        clip_y_range = translated_cfg.get("clip_y_range", None)
+        clip_z_range_high = translated_cfg.get("clip_z_range_high", None)
+        clip_z_range_low = translated_cfg.get("clip_z_range_low", None)
+        clip_rz_range = translated_cfg.get("clip_rz_range", None)
+        clip_rp_range = translated_cfg.get("clip_rp_range", None)
+
+        has_relative_clip_cfg = any(
+            value is not None
+            for value in (
+                clip_x_range,
+                clip_y_range,
+                clip_z_range_high,
+                clip_z_range_low,
+                clip_rz_range,
+                clip_rp_range,
+            )
+        )
+        if not has_relative_clip_cfg:
+            return translated_cfg
+
+        if target_ee_pose is None:
+            raise ValueError(
+                "sim_real_alignment.controller.target_ee_pose is required when "
+                "using clip_* safety range parameters."
+            )
+
+        target_ee_pose = np.asarray(target_ee_pose, dtype=np.float32).reshape(-1)
+        if target_ee_pose.size != 6:
+            raise ValueError(
+                "sim_real_alignment.controller.target_ee_pose must contain 6 values."
+            )
+
+        clip_x_range = float(clip_x_range if clip_x_range is not None else 0.0)
+        clip_y_range = float(clip_y_range if clip_y_range is not None else 0.0)
+        clip_z_range_high = float(
+            clip_z_range_high if clip_z_range_high is not None else 0.0
+        )
+        clip_z_range_low = float(
+            clip_z_range_low if clip_z_range_low is not None else 0.0
+        )
+        clip_rz_range = float(clip_rz_range if clip_rz_range is not None else 0.0)
+        clip_rp_range = float(clip_rp_range if clip_rp_range is not None else 0.0)
+
+        translated_cfg["ee_pose_limit_min"] = [
+            float(target_ee_pose[0] - clip_x_range),
+            float(target_ee_pose[1] - clip_y_range),
+            float(target_ee_pose[2] - clip_z_range_low),
+            float(target_ee_pose[3] - clip_rp_range),
+            float(target_ee_pose[4] - clip_rp_range),
+            float(target_ee_pose[5] - clip_rz_range),
+        ]
+        translated_cfg["ee_pose_limit_max"] = [
+            float(target_ee_pose[0] + clip_x_range),
+            float(target_ee_pose[1] + clip_y_range),
+            float(target_ee_pose[2] + clip_z_range_high),
+            float(target_ee_pose[3] + clip_rp_range),
+            float(target_ee_pose[4] + clip_rp_range),
+            float(target_ee_pose[5] + clip_rz_range),
+        ]
+        return translated_cfg
 
     def _inject_realworld_reward_cfg(self, env_cfg: DictConfig):
         if not (self.use_reward_model and self.use_realworld_reward):
