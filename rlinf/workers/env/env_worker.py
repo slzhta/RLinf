@@ -638,6 +638,29 @@ class EnvWorker(Worker):
             if self.enable_offload and hasattr(self.env_list[i], "offload"):
                 self.env_list[i].offload()
 
+    def _get_metric_domain(self, mode: Literal["train", "eval"]) -> str | None:
+        env_cfg = self.cfg.env.train if mode == "train" else self.cfg.env.eval
+        env_type = env_cfg.get("env_type", None)
+        if env_type == "maniskill":
+            return "sim"
+        if env_type == "realworld":
+            return "real"
+        return None
+
+    def _add_domain_metrics(
+        self, metrics: dict[str, torch.Tensor], mode: Literal["train", "eval"]
+    ) -> dict[str, torch.Tensor]:
+        domain = self._get_metric_domain(mode)
+        if domain is None:
+            return metrics
+
+        domain_metrics = dict(metrics)
+        for key, value in metrics.items():
+            domain_metrics[f"{domain}/{key}"] = value
+            if key == "success_once":
+                domain_metrics[f"{domain}/success_rate"] = value
+        return domain_metrics
+
     @Worker.timer("env_interact_step")
     def env_interact_step(
         self, chunk_actions: torch.Tensor, stage_id: int
@@ -1318,7 +1341,7 @@ class EnvWorker(Worker):
         for key, value in env_metrics.items():
             env_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
-        return env_metrics
+        return self._add_domain_metrics(env_metrics, mode="train")
 
     @Worker.timer("interact")
     async def interact(
@@ -1411,7 +1434,7 @@ class EnvWorker(Worker):
         for key, value in eval_metrics.items():
             eval_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
-        return eval_metrics
+        return self._add_domain_metrics(eval_metrics, mode="eval")
 
     def get_actor_split_num(self):
         send_num = self._component_placement.get_world_size("env") * self.stage_num

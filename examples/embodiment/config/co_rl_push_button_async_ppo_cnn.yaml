@@ -129,6 +129,9 @@ env:
     total_num_envs: 16
     num_workers: 1
     ignore_terminations: True
+    video_cfg:
+      save_video: True
+      video_base_dir: ${runner.logger.log_path}/video/train
     co_training_env_cfg:
       total_num_envs: 1
       num_workers: 1
@@ -140,6 +143,9 @@ env:
   eval:
     total_num_envs: 8
     num_workers: 1
+    video_cfg:
+      save_video: True
+      video_base_dir: ${runner.logger.log_path}/video/eval
     co_training_env_cfg:
       total_num_envs: 1
       num_workers: 1
