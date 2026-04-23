@@ -105,6 +105,7 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
 
     def __init__(self, override_cfg, worker_info=None, hardware_info=None, env_idx=0):
         super().__init__(override_cfg, worker_info, hardware_info, env_idx)
+        self._has_finished_initial_reset = False
         self.task_id = 0  # 0 for forward task, 1 for backward task
         """
         the inner safety box is used to prevent the gripper from hitting the two walls of the bins in the center.
@@ -246,7 +247,9 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
             self.config.compliance_param
         ).wait()
 
-        self.go_to_rest(joint_reset=True)
+        should_joint_reset = self._has_finished_initial_reset
+        self.go_to_rest(joint_reset=should_joint_reset)
+        self._has_finished_initial_reset = True
 
         self._clear_error()
         self._num_steps = 0
