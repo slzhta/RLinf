@@ -620,6 +620,13 @@ class DigitalTwinBaseEnv(BaseEnv):
         if self._is_enabled(self.randomize_joint_control):
             self._randomize_joint_drive(env_idx)
 
+    def sync_gpu_articulation_state(self):
+        if self.device.type != "cuda":
+            return
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+
     # TODO important to check. You should collect real image with the size same with sim camera size.
     def _resize_background_images(self):
         # Real background images may have arbitrary resolutions from captured photos.

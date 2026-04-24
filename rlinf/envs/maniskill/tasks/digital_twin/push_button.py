@@ -36,6 +36,8 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     DEFAULT_BUTTON_RANDOM_XY_RANGE = 0.10
     DEFAULT_RESET_RANDOM_XY_RANGE = 0.01
     DEFAULT_RESET_RANDOM_RZ_RANGE = np.pi / 9
+    GPU_RESET_IK_MAX_POS_STEP = 0.02
+    GPU_RESET_IK_MAX_ROT_STEP = np.pi / 18
     BUTTON_ASSET_DIR = (
         Path(__file__).resolve().parent / "assets" / "objects" / "button"
     )
@@ -50,22 +52,23 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         super()._initialize_episode(env_idx, options)
         self.button.set_pose(self._sample_button_pose(env_idx))
         qpos = self.agent.robot.get_qpos().clone()
-        # reset_ee_pose = self._sample_reset_ee_pose(
-        #     env_idx=env_idx,
-        #     device=qpos.device,
-        #     dtype=qpos.dtype,
-        # )
-        # ik_qpos = self._solve_arm_ik_qpos(
-        #     target_pose=reset_ee_pose,
-        #     seed_qpos=qpos[env_idx],
-        #     env_idx=env_idx,
-        #     device=qpos.device,
-        #     dtype=qpos.dtype,
-        # )
-        # qpos[env_idx, :7] = ik_qpos
+        reset_ee_pose = self._sample_reset_ee_pose(
+            env_idx=env_idx,
+            device=qpos.device,
+            dtype=qpos.dtype,
+        )
+        ik_qpos = self._solve_arm_ik_qpos(
+            target_pose=reset_ee_pose,
+            seed_qpos=qpos[env_idx],
+            env_idx=env_idx,
+            device=qpos.device,
+            dtype=qpos.dtype,
+        )
+        qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
         self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
+        self.sync_gpu_articulation_state()
 
     def _sample_reset_ee_pose(
         self, env_idx: torch.Tensor, device: torch.device, dtype: torch.dtype
@@ -144,15 +147,77 @@ class PushButtonEnv(DigitalTwinBaseEnv):
             raise RuntimeError("Arm controller has no kinematics.compute_ik API.")
 
         current_pose = self.agent.ee_pose_at_robot_base[env_idx]
-        q0 = seed_qpos
+        if device.type == "cuda":
+            return self._solve_arm_ik_qpos_gpu_incremental(
+                kinematics=kinematics,
+                arm_controller=arm_controller,
+                current_pose=current_pose,
+                target_pose=target_pose,
+                seed_qpos=seed_qpos,
+                device=device,
+                dtype=dtype,
+            )
 
         ik_qpos = kinematics.compute_ik(
             pose=target_pose,
-            q0=q0,
+            q0=seed_qpos,
             is_delta_pose=False,
             current_pose=current_pose,
             solver_config=arm_controller.config.delta_solver_config,
         )
+        return self._normalize_ik_qpos(
+            ik_qpos=ik_qpos,
+            seed_qpos=seed_qpos,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _solve_arm_ik_qpos_gpu_incremental(
+        self,
+        kinematics,
+        arm_controller,
+        current_pose: Pose,
+        target_pose: Pose,
+        seed_qpos: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        qpos = seed_qpos.clone()
+        start_pose = current_pose
+        prev_waypoint = current_pose
+        num_steps = self._estimate_gpu_reset_ik_steps(
+            current_pose=current_pose,
+            target_pose=target_pose,
+        )
+
+        for step_idx in range(1, num_steps + 1):
+            alpha = step_idx / num_steps
+            waypoint = self._interpolate_pose(start_pose, target_pose, alpha)
+            ik_qpos = kinematics.compute_ik(
+                pose=waypoint,
+                q0=qpos,
+                is_delta_pose=False,
+                current_pose=prev_waypoint,
+                solver_config=arm_controller.config.delta_solver_config,
+            )
+            arm_qpos = self._normalize_ik_qpos(
+                ik_qpos=ik_qpos,
+                seed_qpos=qpos,
+                device=device,
+                dtype=dtype,
+            )
+            qpos[:, :7] = arm_qpos
+            prev_waypoint = waypoint
+
+        return qpos[:, :7]
+
+    def _normalize_ik_qpos(
+        self,
+        ik_qpos,
+        seed_qpos: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
         if ik_qpos is None:
             return seed_qpos[:, :7]
 
@@ -166,6 +231,49 @@ class PushButtonEnv(DigitalTwinBaseEnv):
                 f"IK result has invalid shape {tuple(ik_qpos.shape)}, expected at least 7 joints."
             )
         return ik_qpos[:, :7]
+
+    def _estimate_gpu_reset_ik_steps(
+        self,
+        current_pose: Pose,
+        target_pose: Pose,
+    ) -> int:
+        position_delta = torch.linalg.norm(target_pose.p - current_pose.p, dim=1)
+        quat_dot = torch.sum(current_pose.q * target_pose.q, dim=1).abs().clamp(max=1.0)
+        rotation_delta = 2.0 * torch.arccos(quat_dot)
+        pos_steps = torch.ceil(position_delta / self.GPU_RESET_IK_MAX_POS_STEP)
+        rot_steps = torch.ceil(rotation_delta / self.GPU_RESET_IK_MAX_ROT_STEP)
+        num_steps = torch.maximum(pos_steps, rot_steps)
+        return max(1, int(num_steps.max().item()))
+
+    def _interpolate_pose(
+        self,
+        start_pose: Pose,
+        target_pose: Pose,
+        alpha: float,
+    ) -> Pose:
+        position = torch.lerp(start_pose.p, target_pose.p, alpha)
+        quaternion = self._slerp_quaternion(start_pose.q, target_pose.q, alpha)
+        return Pose.create_from_pq(p=position, q=quaternion)
+
+    def _slerp_quaternion(
+        self, start_q: torch.Tensor, target_q: torch.Tensor, alpha: float
+    ) -> torch.Tensor:
+        dot = torch.sum(start_q * target_q, dim=1, keepdim=True)
+        target_q = torch.where(dot < 0.0, -target_q, target_q)
+        dot = torch.sum(start_q * target_q, dim=1, keepdim=True).clamp(-1.0, 1.0)
+
+        alpha_t = torch.full_like(dot, float(alpha))
+        linear_mask = dot.abs() > 0.9995
+
+        theta_0 = torch.arccos(dot)
+        sin_theta_0 = torch.sin(theta_0).clamp(min=1e-6)
+        theta = theta_0 * alpha_t
+        s0 = torch.sin(theta_0 - theta) / sin_theta_0
+        s1 = torch.sin(theta) / sin_theta_0
+        slerped = s0 * start_q + s1 * target_q
+        lerped = (1.0 - alpha_t) * start_q + alpha_t * target_q
+        quat = torch.where(linear_mask, lerped, slerped)
+        return quat / torch.linalg.norm(quat, dim=1, keepdim=True).clamp(min=1e-6)
 
     def _get_arm_controller(self):
         controller = getattr(self.agent, "controller", None)

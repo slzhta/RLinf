@@ -139,7 +139,8 @@ class TableSceneBuilder(SceneBuilder):
                         0, self.robot_init_qpos_noise, (b, len(qpos))
                     )
                     + qpos
-                )
+            )
             qpos[:, -2:] = 0.04
             self.env.agent.reset(qpos)
             self.env.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
+            self.env.sync_gpu_articulation_state()
