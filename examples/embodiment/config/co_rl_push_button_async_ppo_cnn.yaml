@@ -109,14 +109,14 @@ env:
   group_name: "EnvGroup"
   sim_real_alignment:
     controller:
-      target_ee_pose: [0.6830848, 0.04919736, -0.00852352, 3.02009191, -0.04776353, -0.02423444]
+      target_ee_pose: [ 0.55852648, 0.01729971, -0.01991324, 3.06966649, -0.00829208, -0.07020666]
       action_scale: [0.01, 0.05, 1.0]
-      clip_x_range: 0.2
-      clip_y_range: 0.3
-      clip_z_range_high: 0.3
-      clip_z_range_low: 0.001
-      clip_rz_range: 0.6283185307179586
-      clip_rp_range: 0.5235987755982988
+      clip_x_range: 0.15
+      clip_y_range: 0.15
+      clip_z_range_high: 0.15
+      clip_z_range_low: 0.01
+      clip_rz_range: 0.5
+      clip_rp_range: 0.01
       use_target_controller: True
     reward:
       use_dense_reward: True
