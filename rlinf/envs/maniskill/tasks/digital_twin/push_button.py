@@ -391,22 +391,14 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         return reward * reward_scale
 
     def _build_button(self):
-        collision_filename = self.BUTTON_ASSET_DIR / "mesh_w_vertex_color_abs.ply"
-        collision_coacd_filename = self.BUTTON_ASSET_DIR / (
-            "mesh_w_vertex_color_abs.ply.coacd.ply"
-        )
-        visual_filename = self.BUTTON_ASSET_DIR / "visual" / "button.obj"
+        mesh_filename = self.BUTTON_ASSET_DIR / "button_mesh_abs.glb"
         builder = self.scene.create_actor_builder()
 
         scale = 1.0
         scale_array = [scale] * 3
-        decomposition = "coacd"
-        if collision_coacd_filename.is_file():
-            collision_filename = collision_coacd_filename
-            decomposition = "none"
 
         builder.add_multiple_convex_collisions_from_file(
-            filename=str(collision_filename),
+            filename=str(mesh_filename),
             scale=scale_array,
             material=PhysxMaterial(
                 static_friction=1.0,
@@ -416,11 +408,11 @@ class PushButtonEnv(DigitalTwinBaseEnv):
             density=1000.0,
             patch_radius=0.1,
             min_patch_radius=0.1,
-            decomposition=decomposition,
+            decomposition="coacd",
         )
 
         builder.add_visual_from_file(
-            filename=str(visual_filename),
+            filename=str(mesh_filename),
             scale=scale_array,
         )
 
