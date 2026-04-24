@@ -50,19 +50,19 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         super()._initialize_episode(env_idx, options)
         self.button.set_pose(self._sample_button_pose(env_idx))
         qpos = self.agent.robot.get_qpos().clone()
-        reset_ee_pose = self._sample_reset_ee_pose(
-            env_idx=env_idx,
-            device=qpos.device,
-            dtype=qpos.dtype,
-        )
-        ik_qpos = self._solve_arm_ik_qpos(
-            target_pose=reset_ee_pose,
-            seed_qpos=qpos[env_idx],
-            env_idx=env_idx,
-            device=qpos.device,
-            dtype=qpos.dtype,
-        )
-        qpos[env_idx, :7] = ik_qpos
+        # reset_ee_pose = self._sample_reset_ee_pose(
+        #     env_idx=env_idx,
+        #     device=qpos.device,
+        #     dtype=qpos.dtype,
+        # )
+        # ik_qpos = self._solve_arm_ik_qpos(
+        #     target_pose=reset_ee_pose,
+        #     seed_qpos=qpos[env_idx],
+        #     env_idx=env_idx,
+        #     device=qpos.device,
+        #     dtype=qpos.dtype,
+        # )
+        # qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
         self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
@@ -321,8 +321,10 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     def _build_extracted_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
         sensor_data = raw_obs.get("sensor_data", {})
+        image_data = raw_obs.get("image", {})
+        main_camera_obs = image_data.get("3rdview_camera", sensor_data["3rdview_camera"])
         main_images = self._pad_and_resize_images(
-            sensor_data["3rdview_camera"]["rgb"].to(torch.uint8)
+            main_camera_obs["rgb"].to(torch.uint8)
         )
 
         extracted_obs = {
@@ -331,9 +333,10 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         }
 
         if "hand_camera" in sensor_data:
+            hand_camera_obs = image_data.get("hand_camera", sensor_data["hand_camera"])
             extracted_obs["extra_view_images"] = (
                 self._pad_and_resize_images(
-                    sensor_data["hand_camera"]["rgb"].to(torch.uint8)
+                    hand_camera_obs["rgb"].to(torch.uint8)
                 ).unsqueeze(1)
             )
 

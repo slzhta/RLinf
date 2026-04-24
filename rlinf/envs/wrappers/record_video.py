@@ -115,11 +115,11 @@ class RecordVideo(gym.Wrapper):
 
     def _get_image_from_dict(self, obs: dict) -> Optional[Any]:
         """Pick the best image field from an observation dict."""
-        if hasattr(self.env, "capture_image"):
-            return self.env.capture_image()
         for key in ("main_images", "images", "rgb", "full_image", "main_image"):
             if key in obs and obs[key] is not None:
                 return obs[key]
+        if hasattr(self.env, "capture_image"):
+            return self.env.capture_image()
         return None
 
     def _extract_frame_batches(self, obs: Any) -> list[list[np.ndarray]]:
