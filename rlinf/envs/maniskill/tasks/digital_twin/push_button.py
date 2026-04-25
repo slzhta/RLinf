@@ -393,7 +393,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     def _build_button(self):
         collision_filename = self.BUTTON_ASSET_DIR / "button_mesh_abs.ply"
         collision_coacd_filename = self.BUTTON_ASSET_DIR / "button_mesh_abs.ply.coacd.ply"
-        visual_filename = self.BUTTON_ASSET_DIR / "button_mesh_abs.ply"
+        visual_filename = self.BUTTON_ASSET_DIR / "visual" / "button.obj"
         builder = self.scene.create_actor_builder()
 
         scale = 1.0
