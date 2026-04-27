@@ -230,13 +230,10 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
         self.task_id = task_id
 
     def reset(self, joint_reset=False, **kwargs):
-        if self.task_id == 0:
-            self._reset_pose[1] = self.config.target_ee_pose[1] + 0.1
-        elif self.task_id == 1:
-            self._reset_pose[1] = self.config.target_ee_pose[1] - 0.1
-        else:
-            raise ValueError(f"Task id {self.task_id} should be 0 or 1")
-        return super().reset(joint_reset)
+        raise NotImplementedError(
+            "FrankaCoTrainingBaseEnv does not define task-specific reset logic. "
+            "Subclasses must implement reset()."
+        )
 
     def go_to_rest(self, joint_reset=False):
         """

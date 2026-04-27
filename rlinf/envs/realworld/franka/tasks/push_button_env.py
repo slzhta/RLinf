@@ -15,7 +15,9 @@
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
+from ..franka_env import FrankaEnv
 from .co_training_base_env import FrankaCoTrainingBaseConfig, FrankaCoTrainingBaseEnv
 
 
@@ -36,4 +38,20 @@ class FrankaPushButtonEnv(FrankaCoTrainingBaseEnv):
     CONFIG_CLS = FrankaPushButtonConfig
 
     def reset(self, joint_reset=False, **kwargs):
-        return super().reset(joint_reset=joint_reset, **kwargs)
+        self._reset_pose = self._build_target_centered_reset_pose()
+        return FrankaEnv.reset(self, joint_reset=joint_reset, **kwargs)
+
+    def _build_target_centered_reset_pose(self) -> np.ndarray:
+        reset_ee_pose = np.asarray(
+            self.config.reset_ee_pose, dtype=np.float64
+        ).reshape(-1)
+        if reset_ee_pose.size != 6:
+            raise ValueError(
+                "reset_ee_pose must contain 6 values [x, y, z, rx, ry, rz]."
+            )
+        return np.concatenate(
+            [
+                reset_ee_pose[:3],
+                R.from_euler("xyz", reset_ee_pose[3:].copy()).as_quat(),
+            ]
+        )
