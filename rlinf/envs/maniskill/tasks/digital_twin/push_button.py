@@ -446,18 +446,20 @@ class PushButtonEnv(DigitalTwinBaseEnv):
                 ).unsqueeze(1)
             )
 
-        gripper_state = self.agent.robot.get_qpos().to(torch.float32)[:, -1:] * 2
+        joint_pos = self.agent.robot.get_qpos().to(torch.float32)[:, :7]
         ee_pose_t = (
             self.agent.ee_pose_at_robot_base.to_transformation_matrix().cpu().numpy()
         )
-        pos = torch.from_numpy(ee_pose_t[:, :3, 3]).to(gripper_state.device)
+        pos = torch.from_numpy(ee_pose_t[:, :3, 3]).to(
+            joint_pos.device, dtype=torch.float32
+        )
         euler = torch.from_numpy(
             np.stack(
                 [mat2euler(ee_pose_t[i, :3, :3], "sxyz") for i in range(self.num_envs)],
                 axis=0,
             )
-        ).to(gripper_state.device, dtype=torch.float32)
-        extracted_obs["states"] = torch.cat([pos, euler, gripper_state], dim=1)
+        ).to(joint_pos.device, dtype=torch.float32)
+        extracted_obs["states"] = torch.cat([joint_pos, pos, euler], dim=1)
         return extracted_obs
 
     def get_language_instruction(self) -> list[str]:

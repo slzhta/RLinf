@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from dataclasses import dataclass, field
 
+import gymnasium as gym
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -36,6 +38,29 @@ class FrankaPushButtonConfig(FrankaCoTrainingBaseConfig):
 
 class FrankaPushButtonEnv(FrankaCoTrainingBaseEnv):
     CONFIG_CLS = FrankaPushButtonConfig
+
+    def __init__(self, override_cfg, worker_info=None, hardware_info=None, env_idx=0):
+        super().__init__(override_cfg, worker_info, hardware_info, env_idx)
+        state_space = self.observation_space["state"]
+        self.observation_space["state"] = gym.spaces.Dict(
+            {
+                "arm_joint_position": state_space["arm_joint_position"],
+                "tcp_pose": state_space["tcp_pose"],
+            }
+        )
+        self._base_observation_space = copy.deepcopy(self.observation_space)
+
+    def _get_observation(self) -> dict:
+        observation = super()._get_observation()
+        if "state" not in observation:
+            return observation
+
+        state = observation["state"]
+        observation["state"] = {
+            "arm_joint_position": state["arm_joint_position"],
+            "tcp_pose": state["tcp_pose"],
+        }
+        return observation
 
     def reset(self, joint_reset=False, **kwargs):
         self._reset_pose = self._build_target_centered_reset_pose()
