@@ -14,6 +14,7 @@ max_episode_steps: 240
 keyboard_reward_wrapper: single_stage
 use_spacemouse: True
 main_image_key: wrist_1
+use_relative_frame: False
 
 video_cfg:
   save_video: False
