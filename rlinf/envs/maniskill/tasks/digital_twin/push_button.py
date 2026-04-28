@@ -30,7 +30,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     CLOSED_GRIPPER_ACTION = -1.0
     OUTPUT_IMAGE_SIZE = 128
     TASK_DESCRIPTION = "reach the button target and press it"
-    SUCCESS_TARGET_Z_OFFSET = 0.03
+    SUCCESS_TARGET_Z_OFFSET = 0.015
     SUCCESS_POSITION_THRESHOLD = 0.015
     DENSE_REWARD_DECAY = 500.0
     DEFAULT_BUTTON_RANDOM_XY_RANGE = 0.10
@@ -67,7 +67,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
-        self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0]))
+        self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0.055]))
         self.sync_gpu_articulation_state()
 
     def _sample_reset_ee_pose(
