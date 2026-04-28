@@ -156,10 +156,10 @@ class PandaUMI(Panda):
         # -------------------------------------------------------------------------- #
         arm_pd_ee_delta_pose_real_root_frame = SafePDEEPoseControllerConfig(
             joint_names=self.arm_joint_names,
-            pos_lower=-0.1,  # -1.0,
-            pos_upper=0.1,  # 1.0,
-            rot_lower=-0.1,  # -np.pi / 2,
-            rot_upper=0.1,  # np.pi / 2,
+            pos_lower=-1.0,
+            pos_upper=1.0,
+            rot_lower=-1.0,
+            rot_upper=1.0,
             stiffness=self.arm_stiffness,
             damping=self.arm_damping,
             force_limit=self.arm_force_limit,
