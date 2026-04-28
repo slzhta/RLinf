@@ -46,6 +46,8 @@ def main():
                 r = R.from_quat(tcp_pose[3:].copy())
                 euler = r.as_euler("xyz")
                 print(np.concatenate([tcp_pose[:3], euler]))
+            elif cmd_str == "getjoint":
+                print(controller.get_state().wait()[0].arm_joint_position)
             else:
                 print(f"Unknown cmd: {cmd_str}")
         except KeyboardInterrupt:
