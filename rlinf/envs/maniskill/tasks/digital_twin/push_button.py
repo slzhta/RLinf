@@ -386,9 +386,9 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         dense_reward = torch.exp(-dense_reward_decay * squared_position_error)
         reward = torch.zeros_like(dense_reward)
         if use_dense_reward:
-            reward = dense_reward
+            reward = dense_reward * reward_scale
         reward[success] = 1.0
-        return reward * reward_scale
+        return reward
 
     def _build_button(self):
         collision_filename = self.BUTTON_ASSET_DIR / "button_mesh_abs.ply"

@@ -345,7 +345,6 @@ class FrankaEnv(gym.Env):
         )
 
         truncated = self._num_steps >= self.config.max_num_steps
-        reward *= self.config.reward_scale
         return observation, reward, terminated, truncated, {}
 
     @property
@@ -403,7 +402,10 @@ class FrankaEnv(gym.Env):
                 # Reset counter if robot leaves the target zone
                 self._success_hold_counter = 0
                 if self.config.use_dense_reward:
-                    reward = np.exp(-500 * np.sum(np.square(target_delta[:3])))
+                    reward = (
+                        np.exp(-500 * np.sum(np.square(target_delta[:3])))
+                        * self.config.reward_scale
+                    )
                 else:
                     reward = 0.0
                 self._logger.debug(
