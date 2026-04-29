@@ -109,7 +109,7 @@ env:
   group_name: "EnvGroup"
   sim_real_alignment:
     controller:
-      target_ee_pose: [ 0.5426241, 0.03041899, -0.01894007, 3.10989859, -0.02453606, -0.0438941]
+      target_ee_pose: [ 0.54230402, 0.03311637, -0.01937367, -3.13769528, -0.03156659, -0.02977936]
       action_scale: [0.01, 0.05, 1.0]
       clip_x_range: 0.15
       clip_y_range: 0.15
@@ -122,7 +122,7 @@ env:
       use_dense_reward: True
       reward_scale: 0.02
     task:
-      button_initial_pose: [-0.0426241, 0.03041899, 0.007, 0.001, -0.013, 0.707, 0.707]
+      button_initial_pose: [-0.07269598, 0.03311637, 0.007, 0.001, -0.013, 0.707, 0.707]
       button_random_xy_range: 0.0
 
   train:
