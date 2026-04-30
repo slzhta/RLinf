@@ -1183,8 +1183,28 @@ class EnvWorker(Worker):
         trajectories: Trajectory = rollout_result.to_splited_trajectories(
             self.actor_split_num
         )
+        if self._use_keyed_actor_trajectory():
+            assert len(trajectories) == 1, (
+                "Keyed env-to-actor trajectory routing currently supports one actor."
+            )
+            channel.put(
+                trajectories[0],
+                key=CommMapper.build_channel_key(
+                    self._rank, 0, extra="train_trajectory"
+                ),
+                async_op=True,
+            )
+            return
+
         for trajectory in trajectories:
             channel.put(trajectory, async_op=True)
+
+    def _use_keyed_actor_trajectory(self) -> bool:
+        return (
+            self.use_co_training
+            and self._component_placement.get_world_size("actor") == 1
+            and self._component_placement.get_world_size("env") > 1
+        )
 
     @Worker.timer("run_interact_once")
     async def _run_interact_once(

@@ -45,6 +45,7 @@ from rlinf.hybrid_engines.fsdp.utils import (
 from rlinf.models import get_model
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.scheduler import Channel, Cluster, CollectiveGroupOptions, Worker
+from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.data_iter_utils import (
     get_iterator_k_split,
     get_reverse_idx,
@@ -1100,13 +1101,33 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         split_num = compute_split_num(send_num, recv_num)
 
         recv_list = []
-        for _ in range(split_num):
-            trajectory: Trajectory = await input_channel.get(async_op=True).async_wait()
-            recv_list.append(trajectory)
+        if self._use_keyed_actor_trajectory():
+            for _ in range(self.stage_num):
+                for src_rank in range(self._component_placement.get_world_size("env")):
+                    trajectory: Trajectory = await input_channel.get(
+                        key=CommMapper.build_channel_key(
+                            src_rank, self._rank, extra="train_trajectory"
+                        ),
+                        async_op=True,
+                    ).async_wait()
+                    recv_list.append(trajectory)
+        else:
+            for _ in range(split_num):
+                trajectory: Trajectory = await input_channel.get(
+                    async_op=True
+                ).async_wait()
+                recv_list.append(trajectory)
 
         self.rollout_batch = convert_trajectories_to_batch(recv_list)
 
         self.rollout_batch = self._process_received_rollout_batch(self.rollout_batch)
+
+    def _use_keyed_actor_trajectory(self) -> bool:
+        return (
+            self.cfg.algorithm.get("sim_real_rl_co_training", False)
+            and self._component_placement.get_world_size("actor") == 1
+            and self._component_placement.get_world_size("env") > 1
+        )
 
     def _process_received_rollout_batch(
         self, rollout_batch: dict[str, torch.Tensor]
