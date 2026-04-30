@@ -126,7 +126,7 @@ env:
       button_random_xy_range: 0.0
 
   train:
-    total_num_envs: 16
+    total_num_envs: 2
     num_workers: 1
     include_states_in_obs: True
     ignore_terminations: True
@@ -176,8 +176,8 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  micro_batch_size: 850
-  global_batch_size: 850
+  micro_batch_size: 150
+  global_batch_size: 150
   seed: 1234
   enable_offload: False
 
