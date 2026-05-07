@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 import time
 from functools import partial
@@ -1019,29 +1020,46 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
             self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
-            self._train_real_blocks = int(
+            (
+                self._train_batch_steps,
+                self._min_train_real_steps,
+                self._target_train_real_steps,
+                self._max_train_real_steps,
+            ) = self._resolve_domain_train_step_window(buffer_cfg)
+            self._real_receive_steps = self._domain_receive_step_count("real")
+            self._sim_receive_steps = self._domain_receive_step_count("sim")
+            self._min_train_sim_steps = (
+                self._train_batch_steps - self._max_train_real_steps
+            )
+            self._target_train_sim_steps = (
+                self._train_batch_steps - self._target_train_real_steps
+            )
+            self._max_train_sim_steps = (
+                self._train_batch_steps - self._min_train_real_steps
+            )
+            self._max_real_buffer_steps = int(
                 buffer_cfg.get(
-                    "train_real_blocks",
-                    self.cfg.env.train.co_training_env_cfg.total_num_envs,
+                    "max_real_buffer_steps",
+                    max(self._max_train_real_steps, self._real_receive_steps),
                 )
             )
-            self._train_sim_blocks = int(
-                buffer_cfg.get("train_sim_blocks", self.cfg.env.train.total_num_envs)
+            self._max_sim_buffer_steps = int(
+                buffer_cfg.get(
+                    "max_sim_buffer_steps",
+                    max(self._max_train_sim_steps, self._sim_receive_steps),
+                )
             )
-            self._max_real_buffer_blocks = int(
-                buffer_cfg.get("max_real_buffer_blocks", self._train_real_blocks)
+            assert self._max_real_buffer_steps >= self._min_train_real_steps, (
+                "max_real_buffer_steps must be >= the minimum real train steps."
             )
-            self._max_sim_buffer_blocks = int(
-                buffer_cfg.get("max_sim_buffer_blocks", self._train_sim_blocks)
+            assert self._max_sim_buffer_steps >= self._min_train_sim_steps, (
+                "max_sim_buffer_steps must be >= the minimum sim train steps."
             )
-            assert self._train_real_blocks > 0 and self._train_sim_blocks > 0, (
-                "Co-training train_real_blocks and train_sim_blocks must be positive."
+            assert self._max_real_buffer_steps >= self._real_receive_steps, (
+                "max_real_buffer_steps must be >= one real trajectory in step units."
             )
-            assert self._max_real_buffer_blocks >= self._train_real_blocks, (
-                "max_real_buffer_blocks must be >= train_real_blocks."
-            )
-            assert self._max_sim_buffer_blocks >= self._train_sim_blocks, (
-                "max_sim_buffer_blocks must be >= train_sim_blocks."
+            assert self._max_sim_buffer_steps >= self._sim_receive_steps, (
+                "max_sim_buffer_steps must be >= one sim trajectory in step units."
             )
             self._next_real_env_rank_idx = 0
             self._next_sim_env_rank_idx = 0
@@ -1149,10 +1167,75 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             and self._component_placement.get_world_size("env") > 1
         )
 
+    def _resolve_domain_train_step_window(
+        self, buffer_cfg
+    ) -> tuple[int, int, int, int]:
+        total_steps = int(self.cfg.actor.global_batch_size)
+        assert total_steps > 1, "actor.global_batch_size must be > 1 for co-training."
+
+        default_real_ratio = self._default_real_step_ratio()
+        target_ratio = float(buffer_cfg.get("real_ratio_target", default_real_ratio))
+        min_ratio = float(buffer_cfg.get("real_ratio_min", default_real_ratio))
+        max_ratio = float(buffer_cfg.get("real_ratio_max", default_real_ratio))
+        assert 0.0 <= min_ratio <= target_ratio <= max_ratio <= 1.0, (
+            "Expected 0 <= real_ratio_min <= real_ratio_target <= "
+            "real_ratio_max <= 1."
+        )
+
+        min_real_steps = math.ceil(total_steps * min_ratio)
+        max_real_steps = math.floor(total_steps * max_ratio)
+        target_real_steps = int(round(total_steps * target_ratio))
+
+        if min_ratio > 0:
+            min_real_steps = max(1, min_real_steps)
+        if max_ratio < 1:
+            max_real_steps = min(total_steps - 1, max_real_steps)
+
+        assert min_real_steps <= max_real_steps, (
+            "No valid real step count exists under co-training ratio window. "
+            "Please relax real_ratio_min/max or adjust actor.global_batch_size."
+        )
+        target_real_steps = min(
+            max(target_real_steps, min_real_steps), max_real_steps
+        )
+
+        return (
+            total_steps,
+            min_real_steps,
+            target_real_steps,
+            max_real_steps,
+        )
+
+    def _default_real_step_ratio(self) -> float:
+        real_steps = int(self.cfg.env.train.co_training_env_cfg.total_num_envs)
+        sim_steps = int(self.cfg.env.train.total_num_envs)
+        total_steps = real_steps + sim_steps
+        assert total_steps > 0, "Co-training total env count must be positive."
+        return real_steps / total_steps
+
+    def _domain_receive_step_count(self, domain: str) -> int:
+        n_chunk_steps = (
+            self.cfg.env.train.max_steps_per_rollout_epoch
+            // self.cfg.actor.model.num_action_chunks
+        )
+        if domain == "real":
+            num_envs = (
+                self.cfg.env.train.co_training_env_cfg.total_num_envs
+                // self.cfg.env.train.co_training_env_cfg.num_workers
+            )
+        elif domain == "sim":
+            num_envs = (
+                self.cfg.env.train.total_num_envs
+                // self.cfg.env.train.num_workers
+            )
+        else:
+            raise ValueError(f"Unsupported co-training domain: {domain}")
+        return int(num_envs * n_chunk_steps)
+
     async def _recv_domain_buffered_batch(
         self, input_channel: Channel
     ) -> dict[str, torch.Tensor]:
-        """Fill domain buffers with processed batches, then take fixed blocks."""
+        """Fill domain buffers, then take a ratio-windowed fixed-size batch."""
         while not self._domain_buffers_ready_for_train():
             src_rank, domain = self._next_receivable_domain_rank(input_channel)
             trajectory = await self._recv_keyed_actor_trajectory(input_channel, src_rank)
@@ -1162,48 +1245,109 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             else:
                 self._sim_batch_buffer.extend(batches)
 
+        train_real_steps = self._select_train_real_steps_from_buffers()
+        assert train_real_steps is not None
+        train_sim_steps = self._train_batch_steps - train_real_steps
         real_batches = self._pop_buffer_blocks(
-            self._real_batch_buffer, self._train_real_blocks
+            self._real_batch_buffer, train_real_steps
         )
         sim_batches = self._pop_buffer_blocks(
-            self._sim_batch_buffer, self._train_sim_blocks
+            self._sim_batch_buffer, train_sim_steps
         )
         return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
 
     def _domain_buffers_ready_for_train(self) -> bool:
-        return (
-            len(self._real_batch_buffer) >= self._train_real_blocks
-            and len(self._sim_batch_buffer) >= self._train_sim_blocks
+        return self._select_train_real_steps_from_buffers() is not None
+
+    def _select_train_real_steps_from_buffers(self) -> int | None:
+        min_real_steps = max(
+            self._min_train_real_steps,
+            self._train_batch_steps - len(self._sim_batch_buffer),
         )
+        max_real_steps = min(
+            self._max_train_real_steps,
+            len(self._real_batch_buffer),
+            self._train_batch_steps,
+        )
+        if min_real_steps > max_real_steps:
+            return None
+
+        target_real_steps = self._target_train_real_steps
+        if target_real_steps < min_real_steps:
+            return min_real_steps
+        if target_real_steps > max_real_steps:
+            return max_real_steps
+        return target_real_steps
 
     def _next_receivable_domain_rank(self, input_channel: Channel) -> tuple[int, str]:
-        can_recv_real = len(self._real_batch_buffer) < self._max_real_buffer_blocks
-        can_recv_sim = len(self._sim_batch_buffer) < self._max_sim_buffer_blocks
+        can_recv_real = (
+            len(self._real_batch_buffer) + self._real_receive_steps
+            <= self._max_real_buffer_steps
+        )
+        can_recv_sim = (
+            len(self._sim_batch_buffer) + self._sim_receive_steps
+            <= self._max_sim_buffer_steps
+        )
         assert can_recv_real or can_recv_sim, (
             "Co-training domain buffers are full but cannot form a training batch."
         )
 
-        queued = self._next_queued_domain_rank(input_channel, can_recv_real, can_recv_sim)
+        queued = self._next_queued_domain_rank(
+            input_channel, can_recv_real, can_recv_sim
+        )
         if queued is not None:
             return queued
 
-        real_need = self._train_real_blocks - len(self._real_batch_buffer)
-        sim_need = self._train_sim_blocks - len(self._sim_batch_buffer)
+        real_need = self._domain_buffer_step_need("real")
+        sim_need = self._domain_buffer_step_need("sim")
         if can_recv_real and (not can_recv_sim or real_need >= sim_need):
             return self._next_real_env_rank(), "real"
         return self._next_sim_env_rank(), "sim"
 
+    def _domain_buffer_step_need(self, domain: str) -> int:
+        if domain == "real":
+            current_steps = len(self._real_batch_buffer)
+            min_steps = self._min_train_real_steps
+            target_steps = self._target_train_real_steps
+        elif domain == "sim":
+            current_steps = len(self._sim_batch_buffer)
+            min_steps = self._min_train_sim_steps
+            target_steps = self._target_train_sim_steps
+        else:
+            raise ValueError(f"Unsupported co-training domain: {domain}")
+
+        min_need = max(0, min_steps - current_steps)
+        if min_need > 0:
+            return min_need
+        return max(0, target_steps - current_steps)
+
     def _next_queued_domain_rank(
         self, input_channel: Channel, can_recv_real: bool, can_recv_sim: bool
     ) -> tuple[int, str] | None:
+        queued_real_rank = None
         if can_recv_real:
             for src_rank in self._real_env_ranks():
                 if self._keyed_actor_trajectory_qsize(input_channel, src_rank) > 0:
-                    return src_rank, "real"
+                    queued_real_rank = src_rank
+                    break
+
+        queued_sim_rank = None
         if can_recv_sim:
             for src_rank in self._sim_env_ranks():
                 if self._keyed_actor_trajectory_qsize(input_channel, src_rank) > 0:
-                    return src_rank, "sim"
+                    queued_sim_rank = src_rank
+                    break
+
+        if queued_real_rank is not None and queued_sim_rank is not None:
+            if self._domain_buffer_step_need("real") >= self._domain_buffer_step_need(
+                "sim"
+            ):
+                return queued_real_rank, "real"
+            return queued_sim_rank, "sim"
+        if queued_real_rank is not None:
+            return queued_real_rank, "real"
+        if queued_sim_rank is not None:
+            return queued_sim_rank, "sim"
         return None
 
     def _keyed_actor_trajectory_qsize(
@@ -1220,43 +1364,68 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     ) -> list[dict[str, torch.Tensor]]:
         batch = convert_trajectories_to_batch([trajectory])
         processed_batch = self._process_received_rollout_batch(batch)
-        return self._split_processed_batch_by_env(processed_batch)
+        return self._split_processed_batch_by_step(processed_batch)
 
-    def _split_processed_batch_by_env(
+    def _split_processed_batch_by_step(
         self, batch: dict[str, torch.Tensor]
     ) -> list[dict[str, torch.Tensor]]:
-        batch_size = self._infer_processed_batch_size(batch)
-        return self._split_rollout_batch_along_batch_dim(batch, batch_size)
+        time_size, batch_size = self._infer_processed_time_and_batch_size(batch)
+        return [
+            self._slice_rollout_batch_step(batch, step_idx, batch_idx, time_size)
+            for batch_idx in range(batch_size)
+            for step_idx in range(time_size)
+        ]
 
-    def _infer_processed_batch_size(self, batch: dict[str, torch.Tensor]) -> int:
+    def _infer_processed_time_and_batch_size(
+        self, batch: dict[str, torch.Tensor]
+    ) -> tuple[int, int]:
         prev_logprobs = batch.get("prev_logprobs", None)
         if isinstance(prev_logprobs, torch.Tensor):
-            return int(prev_logprobs.shape[1])
+            return int(prev_logprobs.shape[0]), int(prev_logprobs.shape[1])
         for value in batch.values():
             if isinstance(value, torch.Tensor):
-                return int(value.shape[1])
+                return int(value.shape[0]), int(value.shape[1])
             if isinstance(value, dict):
-                return self._infer_processed_batch_size(value)
+                return self._infer_processed_time_and_batch_size(value)
         raise ValueError("Cannot infer processed rollout batch size.")
 
-    def _split_rollout_batch_along_batch_dim(
-        self, batch: dict[str, torch.Tensor], split_size: int
-    ) -> list[dict[str, torch.Tensor]]:
-        splits: list[dict[str, torch.Tensor]] = [{} for _ in range(split_size)]
+    def _slice_rollout_batch_step(
+        self,
+        batch: dict[str, torch.Tensor],
+        step_idx: int,
+        batch_idx: int,
+        time_size: int,
+    ) -> dict[str, torch.Tensor]:
+        sliced: dict[str, torch.Tensor] = {}
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                chunks = torch.chunk(value, split_size, dim=1)
-                for idx, chunk in enumerate(chunks):
-                    splits[idx][key] = chunk.contiguous()
-            elif isinstance(value, dict):
-                child_splits = self._split_rollout_batch_along_batch_dim(
-                    value, split_size
+                sliced[key] = self._slice_rollout_tensor_step(
+                    value, step_idx, batch_idx, time_size
                 )
-                for idx, child in enumerate(child_splits):
-                    splits[idx][key] = child
+            elif isinstance(value, dict):
+                sliced[key] = self._slice_rollout_batch_step(
+                    value, step_idx, batch_idx, time_size
+                )
             else:
                 raise ValueError(f"Unsupported rollout batch value type for key {key}.")
-        return splits
+        return sliced
+
+    @staticmethod
+    def _slice_rollout_tensor_step(
+        tensor: torch.Tensor, step_idx: int, batch_idx: int, time_size: int
+    ) -> torch.Tensor:
+        if tensor.shape[0] == time_size + 1:
+            return tensor[
+                step_idx : step_idx + 2, batch_idx : batch_idx + 1
+            ].contiguous()
+        if tensor.shape[0] == time_size:
+            return tensor[
+                step_idx : step_idx + 1, batch_idx : batch_idx + 1
+            ].contiguous()
+        raise ValueError(
+            f"Unexpected rollout tensor time dimension {tensor.shape[0]} "
+            f"for rollout time size {time_size}."
+        )
 
     @staticmethod
     def _pop_buffer_blocks(

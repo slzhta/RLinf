@@ -59,6 +59,11 @@ runner:
 algorithm:
   sim_real_rl_co_training: True
   co_training_rollout_routing_mode: paired
+  co_training_domain_buffer:
+    channel_maxsize: 1
+    real_ratio_min: 0.05
+    real_ratio_target: 0.1
+    real_ratio_max: 0.25
   normalize_advantages: True
   kl_penalty: kl
   group_size: 1
