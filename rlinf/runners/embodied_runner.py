@@ -74,7 +74,11 @@ class EmbodiedRunner:
         # Data channels
         self.env_channel = Channel.create("Env")
         self.rollout_channel = Channel.create("Rollout")
-        self.actor_channel = Channel.create("Actor")
+        actor_channel_maxsize = 0
+        if self.cfg.algorithm.get("sim_real_rl_co_training", False):
+            buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
+            actor_channel_maxsize = int(buffer_cfg.get("channel_maxsize", 1))
+        self.actor_channel = Channel.create("Actor", maxsize=actor_channel_maxsize)
         if self.reward is not None:
             self.reward_channel = Channel.create("Reward")
         else:

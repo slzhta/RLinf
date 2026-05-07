@@ -1187,13 +1187,14 @@ class EnvWorker(Worker):
             assert len(trajectories) == 1, (
                 "Keyed env-to-actor trajectory routing currently supports one actor."
             )
-            channel.put(
+            put_work = channel.put(
                 trajectories[0],
                 key=CommMapper.build_channel_key(
                     self._rank, 0, extra="train_trajectory"
                 ),
                 async_op=True,
             )
+            await put_work.async_wait()
             return
 
         for trajectory in trajectories:

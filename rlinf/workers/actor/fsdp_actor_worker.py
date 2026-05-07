@@ -1015,6 +1015,36 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
+        if self._use_keyed_actor_trajectory():
+            buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
+            self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
+            self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
+            self._train_real_blocks = int(
+                buffer_cfg.get(
+                    "train_real_blocks",
+                    self.cfg.env.train.co_training_env_cfg.total_num_envs,
+                )
+            )
+            self._train_sim_blocks = int(
+                buffer_cfg.get("train_sim_blocks", self.cfg.env.train.total_num_envs)
+            )
+            self._max_real_buffer_blocks = int(
+                buffer_cfg.get("max_real_buffer_blocks", self._train_real_blocks)
+            )
+            self._max_sim_buffer_blocks = int(
+                buffer_cfg.get("max_sim_buffer_blocks", self._train_sim_blocks)
+            )
+            assert self._train_real_blocks > 0 and self._train_sim_blocks > 0, (
+                "Co-training train_real_blocks and train_sim_blocks must be positive."
+            )
+            assert self._max_real_buffer_blocks >= self._train_real_blocks, (
+                "max_real_buffer_blocks must be >= train_real_blocks."
+            )
+            assert self._max_sim_buffer_blocks >= self._train_sim_blocks, (
+                "max_sim_buffer_blocks must be >= train_sim_blocks."
+            )
+            self._next_real_env_rank_idx = 0
+            self._next_sim_env_rank_idx = 0
         if self.enable_sft_co_train:
             self._build_sft_data_loader()
 
@@ -1100,26 +1130,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(send_num, recv_num)
 
-        recv_list = []
         if self._use_keyed_actor_trajectory():
-            for _ in range(self.stage_num):
-                for src_rank in range(self._component_placement.get_world_size("env")):
-                    trajectory: Trajectory = await input_channel.get(
-                        key=CommMapper.build_channel_key(
-                            src_rank, self._rank, extra="train_trajectory"
-                        ),
-                        async_op=True,
-                    ).async_wait()
-                    recv_list.append(trajectory)
-        else:
-            for _ in range(split_num):
-                trajectory: Trajectory = await input_channel.get(
-                    async_op=True
-                ).async_wait()
-                recv_list.append(trajectory)
+            self.rollout_batch = await self._recv_domain_buffered_batch(input_channel)
+            return
+
+        recv_list = []
+        for _ in range(split_num):
+            trajectory: Trajectory = await input_channel.get(async_op=True).async_wait()
+            recv_list.append(trajectory)
 
         self.rollout_batch = convert_trajectories_to_batch(recv_list)
-
         self.rollout_batch = self._process_received_rollout_batch(self.rollout_batch)
 
     def _use_keyed_actor_trajectory(self) -> bool:
@@ -1128,6 +1148,178 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             and self._component_placement.get_world_size("actor") == 1
             and self._component_placement.get_world_size("env") > 1
         )
+
+    async def _recv_domain_buffered_batch(
+        self, input_channel: Channel
+    ) -> dict[str, torch.Tensor]:
+        """Fill domain buffers with processed batches, then take fixed blocks."""
+        while not self._domain_buffers_ready_for_train():
+            src_rank, domain = self._next_receivable_domain_rank(input_channel)
+            trajectory = await self._recv_keyed_actor_trajectory(input_channel, src_rank)
+            batches = self._process_domain_trajectory(trajectory)
+            if domain == "real":
+                self._real_batch_buffer.extend(batches)
+            else:
+                self._sim_batch_buffer.extend(batches)
+
+        real_batches = self._pop_buffer_blocks(
+            self._real_batch_buffer, self._train_real_blocks
+        )
+        sim_batches = self._pop_buffer_blocks(
+            self._sim_batch_buffer, self._train_sim_blocks
+        )
+        return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
+
+    def _domain_buffers_ready_for_train(self) -> bool:
+        return (
+            len(self._real_batch_buffer) >= self._train_real_blocks
+            and len(self._sim_batch_buffer) >= self._train_sim_blocks
+        )
+
+    def _next_receivable_domain_rank(self, input_channel: Channel) -> tuple[int, str]:
+        can_recv_real = len(self._real_batch_buffer) < self._max_real_buffer_blocks
+        can_recv_sim = len(self._sim_batch_buffer) < self._max_sim_buffer_blocks
+        assert can_recv_real or can_recv_sim, (
+            "Co-training domain buffers are full but cannot form a training batch."
+        )
+
+        queued = self._next_queued_domain_rank(input_channel, can_recv_real, can_recv_sim)
+        if queued is not None:
+            return queued
+
+        real_need = self._train_real_blocks - len(self._real_batch_buffer)
+        sim_need = self._train_sim_blocks - len(self._sim_batch_buffer)
+        if can_recv_real and (not can_recv_sim or real_need >= sim_need):
+            return self._next_real_env_rank(), "real"
+        return self._next_sim_env_rank(), "sim"
+
+    def _next_queued_domain_rank(
+        self, input_channel: Channel, can_recv_real: bool, can_recv_sim: bool
+    ) -> tuple[int, str] | None:
+        if can_recv_real:
+            for src_rank in self._real_env_ranks():
+                if self._keyed_actor_trajectory_qsize(input_channel, src_rank) > 0:
+                    return src_rank, "real"
+        if can_recv_sim:
+            for src_rank in self._sim_env_ranks():
+                if self._keyed_actor_trajectory_qsize(input_channel, src_rank) > 0:
+                    return src_rank, "sim"
+        return None
+
+    def _keyed_actor_trajectory_qsize(
+        self, input_channel: Channel, src_rank: int
+    ) -> int:
+        return input_channel.qsize(
+            key=CommMapper.build_channel_key(
+                src_rank, self._rank, extra="train_trajectory"
+            )
+        )
+
+    def _process_domain_trajectory(
+        self, trajectory: Trajectory
+    ) -> list[dict[str, torch.Tensor]]:
+        batch = convert_trajectories_to_batch([trajectory])
+        processed_batch = self._process_received_rollout_batch(batch)
+        return self._split_processed_batch_by_env(processed_batch)
+
+    def _split_processed_batch_by_env(
+        self, batch: dict[str, torch.Tensor]
+    ) -> list[dict[str, torch.Tensor]]:
+        batch_size = self._infer_processed_batch_size(batch)
+        return self._split_rollout_batch_along_batch_dim(batch, batch_size)
+
+    def _infer_processed_batch_size(self, batch: dict[str, torch.Tensor]) -> int:
+        prev_logprobs = batch.get("prev_logprobs", None)
+        if isinstance(prev_logprobs, torch.Tensor):
+            return int(prev_logprobs.shape[1])
+        for value in batch.values():
+            if isinstance(value, torch.Tensor):
+                return int(value.shape[1])
+            if isinstance(value, dict):
+                return self._infer_processed_batch_size(value)
+        raise ValueError("Cannot infer processed rollout batch size.")
+
+    def _split_rollout_batch_along_batch_dim(
+        self, batch: dict[str, torch.Tensor], split_size: int
+    ) -> list[dict[str, torch.Tensor]]:
+        splits: list[dict[str, torch.Tensor]] = [{} for _ in range(split_size)]
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                chunks = torch.chunk(value, split_size, dim=1)
+                for idx, chunk in enumerate(chunks):
+                    splits[idx][key] = chunk.contiguous()
+            elif isinstance(value, dict):
+                child_splits = self._split_rollout_batch_along_batch_dim(
+                    value, split_size
+                )
+                for idx, child in enumerate(child_splits):
+                    splits[idx][key] = child
+            else:
+                raise ValueError(f"Unsupported rollout batch value type for key {key}.")
+        return splits
+
+    @staticmethod
+    def _pop_buffer_blocks(
+        buffer: list[dict[str, torch.Tensor]], num_blocks: int
+    ) -> list[dict[str, torch.Tensor]]:
+        blocks = buffer[:num_blocks]
+        del buffer[:num_blocks]
+        return blocks
+
+    def _concat_rollout_batches_along_batch_dim(
+        self, batches: list[dict[str, torch.Tensor]]
+    ) -> dict[str, torch.Tensor]:
+        assert batches, "Cannot concatenate an empty rollout batch list."
+        if len(batches) == 1:
+            return batches[0]
+
+        merged: dict[str, torch.Tensor] = {}
+        for key, value in batches[0].items():
+            if isinstance(value, torch.Tensor):
+                tensors = [batch[key] for batch in batches if key in batch]
+                if tensors:
+                    merged[key] = torch.cat(tensors, dim=1)
+            elif isinstance(value, dict):
+                child_batches = [batch[key] for batch in batches if key in batch]
+                if child_batches:
+                    merged[key] = self._concat_rollout_batches_along_batch_dim(
+                        child_batches
+                    )
+            else:
+                raise ValueError(f"Unsupported rollout batch value type for key {key}.")
+        return merged
+
+    async def _recv_keyed_actor_trajectory(
+        self, input_channel: Channel, src_rank: int
+    ) -> Trajectory:
+        return await input_channel.get(
+            key=CommMapper.build_channel_key(
+                src_rank, self._rank, extra="train_trajectory"
+            ),
+            async_op=True,
+        ).async_wait()
+
+    def _next_real_env_rank(self) -> int:
+        real_ranks = self._real_env_ranks()
+        assert real_ranks, "Co-training requires at least one real env worker."
+        rank = real_ranks[self._next_real_env_rank_idx % len(real_ranks)]
+        self._next_real_env_rank_idx += 1
+        return rank
+
+    def _next_sim_env_rank(self) -> int:
+        sim_ranks = self._sim_env_ranks()
+        assert sim_ranks, "Co-training requires at least one sim env worker."
+        rank = sim_ranks[self._next_sim_env_rank_idx % len(sim_ranks)]
+        self._next_sim_env_rank_idx += 1
+        return rank
+
+    def _real_env_ranks(self) -> list[int]:
+        return list(range(int(self.cfg.env.train.co_training_env_cfg.num_workers)))
+
+    def _sim_env_ranks(self) -> list[int]:
+        real_world_size = int(self.cfg.env.train.co_training_env_cfg.num_workers)
+        env_world_size = self._component_placement.get_world_size("env")
+        return list(range(real_world_size, env_world_size))
 
     def _process_received_rollout_batch(
         self, rollout_batch: dict[str, torch.Tensor]
