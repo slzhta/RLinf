@@ -1020,6 +1020,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
             self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
+            self._co_training_buffer_metrics: dict[str, float] = {}
             (
                 self._train_batch_steps,
                 self._min_train_real_steps,
@@ -1236,14 +1237,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self, input_channel: Channel
     ) -> dict[str, torch.Tensor]:
         """Fill domain buffers, then take a ratio-windowed fixed-size batch."""
+        real_steps_before_recv = len(self._real_batch_buffer)
+        sim_steps_before_recv = len(self._sim_batch_buffer)
+        received_real_steps = 0
+        received_sim_steps = 0
+
         while not self._domain_buffers_ready_for_train():
             src_rank, domain = self._next_receivable_domain_rank(input_channel)
             trajectory = await self._recv_keyed_actor_trajectory(input_channel, src_rank)
             batches = self._process_domain_trajectory(trajectory)
             if domain == "real":
                 self._real_batch_buffer.extend(batches)
+                received_real_steps += len(batches)
             else:
                 self._sim_batch_buffer.extend(batches)
+                received_sim_steps += len(batches)
 
         train_real_steps = self._select_train_real_steps_from_buffers()
         assert train_real_steps is not None
@@ -1254,6 +1262,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         sim_batches = self._pop_buffer_blocks(
             self._sim_batch_buffer, train_sim_steps
         )
+        self._co_training_buffer_metrics = {
+            "buffer/real_steps_before_recv": float(real_steps_before_recv),
+            "buffer/sim_steps_before_recv": float(sim_steps_before_recv),
+            "buffer/received_real_steps": float(received_real_steps),
+            "buffer/received_sim_steps": float(received_sim_steps),
+            "buffer/real_steps_after_recv": float(
+                real_steps_before_recv + received_real_steps
+            ),
+            "buffer/sim_steps_after_recv": float(
+                sim_steps_before_recv + received_sim_steps
+            ),
+            "buffer/train_real_steps": float(train_real_steps),
+            "buffer/train_sim_steps": float(train_sim_steps),
+            "buffer/train_real_ratio": float(train_real_steps)
+            / float(self._train_batch_steps),
+            "buffer/real_steps_after_pop": float(len(self._real_batch_buffer)),
+            "buffer/sim_steps_after_pop": float(len(self._sim_batch_buffer)),
+            "buffer/max_real_steps": float(self._max_real_buffer_steps),
+            "buffer/max_sim_steps": float(self._max_sim_buffer_steps),
+        }
         return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
 
     def _domain_buffers_ready_for_train(self) -> bool:
@@ -1594,6 +1622,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        if self._use_keyed_actor_trajectory():
+            rollout_metrics.update(self._co_training_buffer_metrics)
         return rollout_metrics
 
     def _build_sft_data_loader(self):
