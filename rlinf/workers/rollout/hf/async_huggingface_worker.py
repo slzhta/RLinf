@@ -94,6 +94,8 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
             )
 
     async def wait_if_stale(self) -> None:
+        if self.use_co_training:
+            return
         if self.staleness_threshold is None:
             return
         assert self.finished_episodes is not None, (

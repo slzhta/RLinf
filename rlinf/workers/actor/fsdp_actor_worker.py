@@ -1041,13 +1041,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._max_real_buffer_steps = int(
                 buffer_cfg.get(
                     "max_real_buffer_steps",
-                    max(self._max_train_real_steps, self._real_receive_steps),
+                    self._default_max_domain_buffer_steps(self._real_receive_steps),
                 )
             )
             self._max_sim_buffer_steps = int(
                 buffer_cfg.get(
                     "max_sim_buffer_steps",
-                    max(self._max_train_sim_steps, self._sim_receive_steps),
+                    self._default_max_domain_buffer_steps(self._sim_receive_steps),
                 )
             )
             assert self._max_real_buffer_steps >= self._min_train_real_steps, (
@@ -1233,6 +1233,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             raise ValueError(f"Unsupported co-training domain: {domain}")
         return int(num_envs * n_chunk_steps)
 
+    def _default_max_domain_buffer_steps(self, receive_steps: int) -> int:
+        """Allow one full domain rollout beyond a train batch worth of steps."""
+        return int(self._train_batch_steps + receive_steps)
+
     async def _recv_domain_buffered_batch(
         self, input_channel: Channel
     ) -> dict[str, torch.Tensor]:
@@ -1318,6 +1322,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         )
         assert can_recv_real or can_recv_sim, (
             "Co-training domain buffers are full but cannot form a training batch."
+            f" real_steps={len(self._real_batch_buffer)},"
+            f" sim_steps={len(self._sim_batch_buffer)},"
+            f" max_real_steps={self._max_real_buffer_steps},"
+            f" max_sim_steps={self._max_sim_buffer_steps},"
+            f" real_receive_steps={self._real_receive_steps},"
+            f" sim_receive_steps={self._sim_receive_steps},"
+            f" train_batch_steps={self._train_batch_steps},"
+            f" real_train_window=({self._min_train_real_steps},"
+            f" {self._target_train_real_steps},"
+            f" {self._max_train_real_steps})."
         )
 
         queued = self._next_queued_domain_rank(
