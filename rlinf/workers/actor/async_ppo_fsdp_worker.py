@@ -88,6 +88,8 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
             self.rollout_batch["loss_mask_sum"] = kwargs["loss_mask_sum"]
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        if self._use_keyed_actor_trajectory():
+            rollout_metrics.update(self._co_training_buffer_metrics)
         return rollout_metrics
 
     @torch.inference_mode()
