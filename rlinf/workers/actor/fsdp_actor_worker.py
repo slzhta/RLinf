@@ -1018,6 +1018,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.version = 0
         if self._use_keyed_actor_trajectory():
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
+            self._actor_train_batch_steps = int(self.cfg.actor.global_batch_size)
             self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._co_training_buffer_metrics: dict[str, float] = {}
@@ -1171,8 +1172,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def _resolve_domain_train_step_window(
         self, buffer_cfg
     ) -> tuple[int, int, int, int]:
-        total_steps = int(self.cfg.actor.global_batch_size)
-        assert total_steps > 1, "actor.global_batch_size must be > 1 for co-training."
+        total_steps = int(
+            buffer_cfg.get("sample_batch_size", self._actor_train_batch_steps)
+        )
+        assert total_steps > 1, (
+            "co_training_domain_buffer.sample_batch_size must be > 1 for co-training."
+        )
+        assert total_steps >= self._actor_train_batch_steps, (
+            "co_training_domain_buffer.sample_batch_size must be >= "
+            "actor.global_batch_size."
+        )
+        assert total_steps % self._actor_train_batch_steps == 0, (
+            "co_training_domain_buffer.sample_batch_size must be divisible by "
+            "actor.global_batch_size so async PPO can split buffer samples into "
+            "train batches."
+        )
 
         default_real_ratio = self._default_real_step_ratio()
         target_ratio = float(buffer_cfg.get("real_ratio_target", default_real_ratio))
@@ -1194,7 +1208,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         assert min_real_steps <= max_real_steps, (
             "No valid real step count exists under co-training ratio window. "
-            "Please relax real_ratio_min/max or adjust actor.global_batch_size."
+            "Please relax real_ratio_min/max or adjust "
+            "co_training_domain_buffer.sample_batch_size."
         )
         target_real_steps = min(
             max(target_real_steps, min_real_steps), max_real_steps
@@ -1234,7 +1249,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         return int(num_envs * n_chunk_steps)
 
     def _default_max_domain_buffer_steps(self, receive_steps: int) -> int:
-        """Allow one full domain rollout beyond a train batch worth of steps."""
+        """Allow one full domain rollout beyond a buffer sample worth of steps."""
         return int(self._train_batch_steps + receive_steps)
 
     async def _recv_domain_buffered_batch(
@@ -1281,6 +1296,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "buffer/train_sim_steps": float(train_sim_steps),
             "buffer/train_real_ratio": float(train_real_steps)
             / float(self._train_batch_steps),
+            "buffer/sample_batch_size": float(self._train_batch_steps),
+            "buffer/actor_global_batch_size": float(self._actor_train_batch_steps),
+            "buffer/num_train_global_batches": float(
+                self._train_batch_steps // self._actor_train_batch_steps
+            ),
             "buffer/real_steps_after_pop": float(len(self._real_batch_buffer)),
             "buffer/sim_steps_after_pop": float(len(self._sim_batch_buffer)),
             "buffer/max_real_steps": float(self._max_real_buffer_steps),
@@ -1328,7 +1348,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             f" max_sim_steps={self._max_sim_buffer_steps},"
             f" real_receive_steps={self._real_receive_steps},"
             f" sim_receive_steps={self._sim_receive_steps},"
-            f" train_batch_steps={self._train_batch_steps},"
+            f" sample_batch_size={self._train_batch_steps},"
+            f" actor_global_batch_size={self._actor_train_batch_steps},"
             f" real_train_window=({self._min_train_real_steps},"
             f" {self._target_train_real_steps},"
             f" {self._max_train_real_steps})."
