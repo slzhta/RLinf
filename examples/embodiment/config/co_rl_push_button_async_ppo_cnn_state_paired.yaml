@@ -61,7 +61,7 @@ algorithm:
   co_training_rollout_routing_mode: paired
   co_training_domain_buffer:
     channel_maxsize: 1
-    sample_rollout_length: 10
+    sample_rollout_length: 20
     real_ratio_min: 0.10
     real_ratio_target: 0.25
     real_ratio_max: 0.50
