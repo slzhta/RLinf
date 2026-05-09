@@ -61,7 +61,7 @@ algorithm:
   co_training_rollout_routing_mode: paired
   co_training_domain_buffer:
     channel_maxsize: 1
-    sample_batch_size: 1024
+    sample_rollout_length: 10
     real_ratio_min: 0.10
     real_ratio_target: 0.25
     real_ratio_max: 0.50
@@ -182,8 +182,8 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  micro_batch_size: 512
-  global_batch_size: 512
+  micro_batch_size: 500
+  global_batch_size: 500
   seed: 1234
   enable_offload: False
 

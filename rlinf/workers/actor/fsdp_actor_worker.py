@@ -1020,6 +1020,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self._use_keyed_actor_trajectory():
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
             self._actor_train_batch_steps = int(self.cfg.actor.global_batch_size)
+            self._rollout_steps_per_trajectory = (
+                self.cfg.env.train.max_steps_per_rollout_epoch
+                // self.cfg.actor.model.num_action_chunks
+            )
             self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._co_training_buffer_metrics: dict[str, float] = {}
@@ -1061,10 +1065,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "max_sim_buffer_steps must be >= the minimum sim train steps."
             )
             assert self._max_real_buffer_steps >= self._real_receive_steps, (
-                "max_real_buffer_steps must be >= one real trajectory in step units."
+                "max_real_buffer_steps must be >= one real worker rollout in "
+                "trajectory units."
             )
             assert self._max_sim_buffer_steps >= self._sim_receive_steps, (
-                "max_sim_buffer_steps must be >= one sim trajectory in step units."
+                "max_sim_buffer_steps must be >= one sim worker rollout in "
+                "trajectory units."
             )
             self._next_real_env_rank_idx = 0
             self._next_sim_env_rank_idx = 0
@@ -1175,18 +1181,31 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def _resolve_domain_train_step_window(
         self, buffer_cfg
     ) -> tuple[int, int, int, int]:
-        total_steps = int(
-            buffer_cfg.get("sample_batch_size", self._actor_train_batch_steps)
-        )
+        if "sample_rollout_length" in buffer_cfg:
+            total_steps = int(buffer_cfg.sample_rollout_length)
+        else:
+            sample_batch_size = int(
+                buffer_cfg.get("sample_batch_size", self._actor_train_batch_steps)
+            )
+            assert sample_batch_size % self._rollout_steps_per_trajectory == 0, (
+                "co_training_domain_buffer.sample_batch_size must be divisible by "
+                "one trajectory length when trajectory buffering is used. Prefer "
+                "setting co_training_domain_buffer.sample_rollout_length."
+            )
+            total_steps = sample_batch_size // self._rollout_steps_per_trajectory
+
         assert total_steps > 1, (
-            "co_training_domain_buffer.sample_batch_size must be > 1 for co-training."
+            "co_training_domain_buffer.sample_rollout_length must be > 1 for "
+            "co-training."
         )
-        assert total_steps >= self._actor_train_batch_steps, (
-            "co_training_domain_buffer.sample_batch_size must be >= "
-            "actor.global_batch_size."
+        flattened_sample_steps = total_steps * self._rollout_steps_per_trajectory
+        assert flattened_sample_steps >= self._actor_train_batch_steps, (
+            "co_training_domain_buffer.sample_rollout_length * trajectory length "
+            "must be >= actor.global_batch_size."
         )
-        assert total_steps % self._actor_train_batch_steps == 0, (
-            "co_training_domain_buffer.sample_batch_size must be divisible by "
+        assert flattened_sample_steps % self._actor_train_batch_steps == 0, (
+            "co_training_domain_buffer.sample_rollout_length * trajectory length "
+            "must be divisible by "
             "actor.global_batch_size so async PPO can split buffer samples into "
             "train batches."
         )
@@ -1233,10 +1252,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         return real_steps / total_steps
 
     def _domain_receive_step_count(self, domain: str) -> int:
-        n_chunk_steps = (
-            self.cfg.env.train.max_steps_per_rollout_epoch
-            // self.cfg.actor.model.num_action_chunks
-        )
         if domain == "real":
             num_envs = (
                 self.cfg.env.train.co_training_env_cfg.total_num_envs
@@ -1249,10 +1264,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             )
         else:
             raise ValueError(f"Unsupported co-training domain: {domain}")
-        return int(num_envs * n_chunk_steps)
+        return int(num_envs)
 
     def _default_max_domain_buffer_steps(self, receive_steps: int) -> int:
-        """Allow one full domain rollout beyond a buffer sample worth of steps."""
+        """Allow one full domain worker rollout beyond a buffer sample."""
         return int(self._train_batch_steps + receive_steps)
 
     async def _recv_domain_buffered_batch(
@@ -1276,11 +1291,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             if domain == "real":
                 self._real_batch_buffer.extend(batches)
                 received_real_steps += len(batches)
-                self._real_env_interaction_steps += len(batches)
+                self._real_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
             else:
                 self._sim_batch_buffer.extend(batches)
                 received_sim_steps += len(batches)
-                self._sim_env_interaction_steps += len(batches)
+                self._sim_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
 
         train_real_steps = self._select_train_real_steps_from_buffers()
         assert train_real_steps is not None
@@ -1292,35 +1311,78 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._sim_batch_buffer, train_sim_steps
         )
         self._co_training_buffer_metrics = {
-            "buffer/real_steps_before_recv": float(real_steps_before_recv),
-            "buffer/sim_steps_before_recv": float(sim_steps_before_recv),
-            "buffer/received_real_steps": float(received_real_steps),
-            "buffer/received_sim_steps": float(received_sim_steps),
+            "buffer/real_rollouts_before_recv": float(real_steps_before_recv),
+            "buffer/sim_rollouts_before_recv": float(sim_steps_before_recv),
+            "buffer/received_real_rollouts": float(received_real_steps),
+            "buffer/received_sim_rollouts": float(received_sim_steps),
+            "buffer/real_steps_before_recv": float(
+                real_steps_before_recv * self._rollout_steps_per_trajectory
+            ),
+            "buffer/sim_steps_before_recv": float(
+                sim_steps_before_recv * self._rollout_steps_per_trajectory
+            ),
+            "buffer/received_real_steps": float(
+                received_real_steps * self._rollout_steps_per_trajectory
+            ),
+            "buffer/received_sim_steps": float(
+                received_sim_steps * self._rollout_steps_per_trajectory
+            ),
             "buffer/real_env_interaction_steps": float(
                 self._real_env_interaction_steps
             ),
             "buffer/sim_env_interaction_steps": float(
                 self._sim_env_interaction_steps
             ),
-            "buffer/real_steps_after_recv": float(
+            "buffer/real_rollouts_after_recv": float(
                 real_steps_before_recv + received_real_steps
             ),
-            "buffer/sim_steps_after_recv": float(
+            "buffer/sim_rollouts_after_recv": float(
                 sim_steps_before_recv + received_sim_steps
             ),
-            "buffer/train_real_steps": float(train_real_steps),
-            "buffer/train_sim_steps": float(train_sim_steps),
+            "buffer/real_steps_after_recv": float(
+                (real_steps_before_recv + received_real_steps)
+                * self._rollout_steps_per_trajectory
+            ),
+            "buffer/sim_steps_after_recv": float(
+                (sim_steps_before_recv + received_sim_steps)
+                * self._rollout_steps_per_trajectory
+            ),
+            "buffer/train_real_rollouts": float(train_real_steps),
+            "buffer/train_sim_rollouts": float(train_sim_steps),
+            "buffer/train_real_steps": float(
+                train_real_steps * self._rollout_steps_per_trajectory
+            ),
+            "buffer/train_sim_steps": float(
+                train_sim_steps * self._rollout_steps_per_trajectory
+            ),
             "buffer/train_real_ratio": float(train_real_steps)
             / float(self._train_batch_steps),
-            "buffer/sample_batch_size": float(self._train_batch_steps),
+            "buffer/sample_rollout_length": float(self._train_batch_steps),
+            "buffer/sample_batch_size": float(
+                self._train_batch_steps * self._rollout_steps_per_trajectory
+            ),
             "buffer/actor_global_batch_size": float(self._actor_train_batch_steps),
             "buffer/num_train_global_batches": float(
-                self._train_batch_steps // self._actor_train_batch_steps
+                self._train_batch_steps
+                * self._rollout_steps_per_trajectory
+                // self._actor_train_batch_steps
             ),
-            "buffer/real_steps_after_pop": float(len(self._real_batch_buffer)),
-            "buffer/sim_steps_after_pop": float(len(self._sim_batch_buffer)),
-            "buffer/max_real_steps": float(self._max_real_buffer_steps),
-            "buffer/max_sim_steps": float(self._max_sim_buffer_steps),
+            "buffer/real_rollouts_after_pop": float(len(self._real_batch_buffer)),
+            "buffer/sim_rollouts_after_pop": float(len(self._sim_batch_buffer)),
+            "buffer/real_steps_after_pop": float(
+                len(self._real_batch_buffer) * self._rollout_steps_per_trajectory
+            ),
+            "buffer/sim_steps_after_pop": float(
+                len(self._sim_batch_buffer) * self._rollout_steps_per_trajectory
+            ),
+            "buffer/max_real_rollouts": float(self._max_real_buffer_steps),
+            "buffer/max_sim_rollouts": float(self._max_sim_buffer_steps),
+            "buffer/max_real_steps": float(
+                self._max_real_buffer_steps * self._rollout_steps_per_trajectory
+            ),
+            "buffer/max_sim_steps": float(
+                self._max_sim_buffer_steps * self._rollout_steps_per_trajectory
+            ),
         }
         return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
 
@@ -1360,13 +1422,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         )
         assert can_recv_real or can_recv_sim, (
             "Co-training domain buffers are full but cannot form a training batch."
-            f" real_steps={len(self._real_batch_buffer)},"
-            f" sim_steps={len(self._sim_batch_buffer)},"
-            f" max_real_steps={self._max_real_buffer_steps},"
-            f" max_sim_steps={self._max_sim_buffer_steps},"
-            f" real_receive_steps={self._real_receive_steps},"
-            f" sim_receive_steps={self._sim_receive_steps},"
-            f" sample_batch_size={self._train_batch_steps},"
+            f" real_rollouts={len(self._real_batch_buffer)},"
+            f" sim_rollouts={len(self._sim_batch_buffer)},"
+            f" max_real_rollouts={self._max_real_buffer_steps},"
+            f" max_sim_rollouts={self._max_sim_buffer_steps},"
+            f" real_receive_rollouts={self._real_receive_steps},"
+            f" sim_receive_rollouts={self._sim_receive_steps},"
+            f" sample_rollout_length={self._train_batch_steps},"
             f" actor_global_batch_size={self._actor_train_batch_steps},"
             f" real_train_window=({self._min_train_real_steps},"
             f" {self._target_train_real_steps},"
@@ -1438,16 +1500,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     ) -> list[dict[str, torch.Tensor]]:
         batch = convert_trajectories_to_batch([trajectory])
         processed_batch = self._process_received_rollout_batch(batch)
-        return self._split_processed_batch_by_step(processed_batch)
+        return self._split_processed_batch_by_trajectory(processed_batch)
 
-    def _split_processed_batch_by_step(
+    def _split_processed_batch_by_trajectory(
         self, batch: dict[str, torch.Tensor]
     ) -> list[dict[str, torch.Tensor]]:
         time_size, batch_size = self._infer_processed_time_and_batch_size(batch)
         return [
-            self._slice_rollout_batch_step(batch, step_idx, batch_idx, time_size)
+            self._slice_rollout_batch_trajectory(batch, batch_idx, time_size)
             for batch_idx in range(batch_size)
-            for step_idx in range(time_size)
         ]
 
     def _infer_processed_time_and_batch_size(
@@ -1463,39 +1524,32 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 return self._infer_processed_time_and_batch_size(value)
         raise ValueError("Cannot infer processed rollout batch size.")
 
-    def _slice_rollout_batch_step(
+    def _slice_rollout_batch_trajectory(
         self,
         batch: dict[str, torch.Tensor],
-        step_idx: int,
         batch_idx: int,
         time_size: int,
     ) -> dict[str, torch.Tensor]:
         sliced: dict[str, torch.Tensor] = {}
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                sliced[key] = self._slice_rollout_tensor_step(
-                    value, step_idx, batch_idx, time_size
+                sliced[key] = self._slice_rollout_tensor_trajectory(
+                    value, batch_idx, time_size
                 )
             elif isinstance(value, dict):
-                sliced[key] = self._slice_rollout_batch_step(
-                    value, step_idx, batch_idx, time_size
+                sliced[key] = self._slice_rollout_batch_trajectory(
+                    value, batch_idx, time_size
                 )
             else:
                 raise ValueError(f"Unsupported rollout batch value type for key {key}.")
         return sliced
 
     @staticmethod
-    def _slice_rollout_tensor_step(
-        tensor: torch.Tensor, step_idx: int, batch_idx: int, time_size: int
+    def _slice_rollout_tensor_trajectory(
+        tensor: torch.Tensor, batch_idx: int, time_size: int
     ) -> torch.Tensor:
-        if tensor.shape[0] == time_size + 1:
-            return tensor[
-                step_idx : step_idx + 2, batch_idx : batch_idx + 1
-            ].contiguous()
-        if tensor.shape[0] == time_size:
-            return tensor[
-                step_idx : step_idx + 1, batch_idx : batch_idx + 1
-            ].contiguous()
+        if tensor.shape[0] in (time_size, time_size + 1):
+            return tensor[:, batch_idx : batch_idx + 1].contiguous()
         raise ValueError(
             f"Unexpected rollout tensor time dimension {tensor.shape[0]} "
             f"for rollout time size {time_size}."
