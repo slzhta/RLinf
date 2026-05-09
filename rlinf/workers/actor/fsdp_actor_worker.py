@@ -1023,6 +1023,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._real_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._sim_batch_buffer: list[dict[str, torch.Tensor]] = []
             self._co_training_buffer_metrics: dict[str, float] = {}
+            self._real_env_interaction_steps = 0
+            self._sim_env_interaction_steps = 0
             (
                 self._train_batch_steps,
                 self._min_train_real_steps,
@@ -1274,9 +1276,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             if domain == "real":
                 self._real_batch_buffer.extend(batches)
                 received_real_steps += len(batches)
+                self._real_env_interaction_steps += len(batches)
             else:
                 self._sim_batch_buffer.extend(batches)
                 received_sim_steps += len(batches)
+                self._sim_env_interaction_steps += len(batches)
 
         train_real_steps = self._select_train_real_steps_from_buffers()
         assert train_real_steps is not None
@@ -1292,6 +1296,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "buffer/sim_steps_before_recv": float(sim_steps_before_recv),
             "buffer/received_real_steps": float(received_real_steps),
             "buffer/received_sim_steps": float(received_sim_steps),
+            "buffer/real_env_interaction_steps": float(
+                self._real_env_interaction_steps
+            ),
+            "buffer/sim_env_interaction_steps": float(
+                self._sim_env_interaction_steps
+            ),
             "buffer/real_steps_after_recv": float(
                 real_steps_before_recv + received_real_steps
             ),
