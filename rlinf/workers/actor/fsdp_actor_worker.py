@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import math
 import os
 import time
@@ -1262,7 +1263,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         received_sim_steps = 0
 
         while not self._domain_buffers_ready_for_train():
-            src_rank, domain = self._next_receivable_domain_rank(input_channel)
+            receivable = self._next_receivable_domain_rank(input_channel)
+            if receivable is None:
+                await asyncio.sleep(0.01)
+                continue
+
+            src_rank, domain = receivable
             trajectory = await self._recv_keyed_actor_trajectory(input_channel, src_rank)
             batches = self._process_domain_trajectory(trajectory)
             if domain == "real":
@@ -1331,7 +1337,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return max_real_steps
         return target_real_steps
 
-    def _next_receivable_domain_rank(self, input_channel: Channel) -> tuple[int, str]:
+    def _next_receivable_domain_rank(
+        self, input_channel: Channel
+    ) -> tuple[int, str] | None:
         can_recv_real = (
             len(self._real_batch_buffer) + self._real_receive_steps
             <= self._max_real_buffer_steps
@@ -1358,14 +1366,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         queued = self._next_queued_domain_rank(
             input_channel, can_recv_real, can_recv_sim
         )
-        if queued is not None:
-            return queued
-
-        real_need = self._domain_buffer_step_need("real")
-        sim_need = self._domain_buffer_step_need("sim")
-        if can_recv_real and (not can_recv_sim or real_need >= sim_need):
-            return self._next_real_env_rank(), "real"
-        return self._next_sim_env_rank(), "sim"
+        return queued
 
     def _domain_buffer_step_need(self, domain: str) -> int:
         if domain == "real":
