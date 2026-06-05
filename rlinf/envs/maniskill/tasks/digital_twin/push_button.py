@@ -36,6 +36,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     DEFAULT_BUTTON_RANDOM_XY_RANGE = 0.10
     DEFAULT_RESET_RANDOM_XY_RANGE = 0.01
     DEFAULT_RESET_RANDOM_RZ_RANGE = np.pi / 9
+    ROBOT_INITIAL_POSITION = np.array([-0.615, 0.0, 0.055], dtype=np.float32)
     GPU_RESET_IK_MAX_POS_STEP = 0.02
     GPU_RESET_IK_MAX_ROT_STEP = np.pi / 18
     BUTTON_ASSET_DIR = (
@@ -67,7 +68,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
         self.agent.reset(qpos)
-        self.agent.robot.set_pose(sapien.Pose([-0.615, 0, 0.055]))
+        self.agent.robot.set_pose(sapien.Pose(self.ROBOT_INITIAL_POSITION))
         self.sync_gpu_articulation_state()
 
     def _sample_reset_ee_pose(
@@ -288,12 +289,16 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     def _sample_button_pose(self, env_idx: torch.Tensor) -> Pose:
         button_pose = self.task_alignment.get("button_initial_pose", None)
+        if button_pose is None and bool(
+            self.task_alignment.get("button_initial_pose_from_target_ee_pose", False)
+        ):
+            button_pose = self._button_pose_from_target_ee_pose()
         if button_pose is None:
             button_pose = np.hstack([self.BUTTON_POSE.p, self.BUTTON_POSE.q])
         button_pose = np.asarray(button_pose, dtype=np.float32).reshape(-1)
         if button_pose.size != 7:
             raise ValueError(
-                "task_alignment.button_initial_pose must contain 7 values [x, y, z, qx, qy, qz, qw]."
+                "task_alignment.button_initial_pose must contain 7 values [x, y, z, qw, qx, qy, qz]."
             )
 
         b = len(env_idx)
@@ -313,9 +318,68 @@ class PushButtonEnv(DigitalTwinBaseEnv):
             q=torch.as_tensor(quat, device=self.device, dtype=torch.float32),
         )
 
+    def _button_pose_from_target_ee_pose(self) -> np.ndarray:
+        target_ee_pose = np.asarray(
+            self.controller_alignment.get(
+                "target_ee_pose",
+                [0.5, 0.0, 0.1, -3.14, 0.0, 0.0],
+            ),
+            dtype=np.float32,
+        ).reshape(-1)
+        if target_ee_pose.size != 6:
+            raise ValueError(
+                "controller_alignment.target_ee_pose must contain 6 values [x, y, z, rx, ry, rz]."
+            )
+
+        robot_position = np.asarray(
+            self.task_alignment.get(
+                "robot_initial_position", self.ROBOT_INITIAL_POSITION
+            ),
+            dtype=np.float32,
+        ).reshape(-1)
+        if robot_position.size != 3:
+            raise ValueError(
+                "task_alignment.robot_initial_position must contain 3 values [x, y, z]."
+            )
+
+        button_target_offset = self._get_button_target_offset_np()
+        button_position = robot_position + target_ee_pose[:3] - button_target_offset
+        button_quat = np.asarray(
+            self.task_alignment.get("button_initial_quat", self.BUTTON_POSE.q),
+            dtype=np.float32,
+        ).reshape(-1)
+        if button_quat.size != 4:
+            raise ValueError(
+                "task_alignment.button_initial_quat must contain 4 values [qw, qx, qy, qz]."
+            )
+        return np.hstack([button_position, button_quat])
+
+    def _get_button_target_offset_np(self) -> np.ndarray:
+        offset = self.task_alignment.get("button_target_offset", None)
+        if offset is None:
+            offset = [
+                0.0,
+                0.0,
+                float(
+                    self.task_alignment.get(
+                        "button_target_z_offset", self.SUCCESS_TARGET_Z_OFFSET
+                    )
+                ),
+            ]
+        offset = np.asarray(offset, dtype=np.float32).reshape(-1)
+        if offset.size != 3:
+            raise ValueError(
+                "task_alignment.button_target_offset must contain 3 values [x, y, z]."
+            )
+        return offset
+
     def _get_button_target_position(self) -> torch.Tensor:
-        target_position = self.button.pose.p.clone()
-        target_position[:, 2] += self.SUCCESS_TARGET_Z_OFFSET
+        target_offset = torch.as_tensor(
+            self._get_button_target_offset_np(),
+            device=self.button.pose.p.device,
+            dtype=self.button.pose.p.dtype,
+        )
+        target_position = self.button.pose.p + target_offset
         return target_position
 
     def _get_button_contact_force(self) -> torch.Tensor:
@@ -500,7 +564,10 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
     def reset(self, seed=None, options=None):
         raw_obs, infos = super().reset(seed=seed, options=options)
-        infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        if isinstance(raw_obs, dict) and (
+            "sensor_data" in raw_obs or "image" in raw_obs
+        ):
+            infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
         return raw_obs, infos
 
     def _append_closed_gripper_action(self, action):
