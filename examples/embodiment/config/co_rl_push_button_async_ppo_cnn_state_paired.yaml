@@ -139,8 +139,9 @@ env:
     include_states_in_obs: True
     ignore_terminations: False
     video_cfg:
-      save_video: False
+      save_video: True
       video_base_dir: ${runner.logger.log_path}/video/train
+      record_interval: 5
     co_training_env_cfg:
       total_num_envs: 1
       num_workers: 1

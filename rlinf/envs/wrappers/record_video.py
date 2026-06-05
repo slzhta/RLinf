@@ -78,6 +78,9 @@ class RecordVideo(gym.Wrapper):
         self._num_envs = getattr(env, "num_envs", 1)
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._save_futures: list[Future] = []
+        self.record_interval = getattr(video_cfg, "record_interval", 1)
+        self._episode_count = 0
+        self._recording = True
 
         if fps is not None:
             self._fps = fps
@@ -312,6 +315,8 @@ class RecordVideo(gym.Wrapper):
         time_idx: Optional[int] = None,
     ) -> None:
         """Overlay info (optional) and append a tiled frame."""
+        if not self._recording:
+            return
         if not images:
             return
         if self.video_cfg.get("info_on_video", True):
@@ -359,7 +364,10 @@ class RecordVideo(gym.Wrapper):
     def reset(self, *args, **kwargs):
         """Reset env and record the initial frame."""
         obs, info = self.env.reset(*args, **kwargs)
-        self.add_new_frames(obs, info)
+        self._episode_count += 1
+        self._recording = (self._episode_count % self.record_interval == 0)
+        if self._recording:
+            self.add_new_frames(obs, info)
         return obs, info
 
     def step(self, action):
@@ -409,7 +417,7 @@ class RecordVideo(gym.Wrapper):
 
     def flush_video(self, video_sub_dir: Optional[str] = None):
         """Write buffered frames to an MP4 file (async)."""
-        if not self.render_images:
+        if not self._recording or not self.render_images:
             return
 
         output_dir = os.path.join(
