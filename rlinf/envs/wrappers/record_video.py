@@ -106,6 +106,22 @@ class RecordVideo(gym.Wrapper):
             return int(metadata["render_fps"])
         return 30
 
+    def _resolve_runtime_path(self, path: str) -> str:
+        """Resolve paths that must use the current worker process environment."""
+        prefix = "runtime_env:"
+        if not isinstance(path, str) or not path.startswith(prefix):
+            return path
+
+        rest = path[len(prefix) :]
+        env_name, sep, suffix = rest.partition("/")
+        env_value = os.environ.get(env_name)
+        if not env_value:
+            raise RuntimeError(
+                f"{env_name} is not set in this worker process; "
+                f"cannot resolve video path {path!r}"
+            )
+        return os.path.join(env_value, suffix) if sep else env_value
+
     def _to_numpy(self, value: Any) -> np.ndarray:
         """Convert tensors/arrays to numpy."""
         if torch is not None and isinstance(value, torch.Tensor):
@@ -416,9 +432,8 @@ class RecordVideo(gym.Wrapper):
         if not self.render_images:
             return
 
-        output_dir = os.path.join(
-            self.video_cfg.video_base_dir, f"seed_{self.env.seed}"
-        )
+        video_base_dir = self._resolve_runtime_path(self.video_cfg.video_base_dir)
+        output_dir = os.path.join(video_base_dir, f"seed_{self.env.seed}")
         if video_sub_dir is not None:
             output_dir = os.path.join(output_dir, f"{video_sub_dir}")
 

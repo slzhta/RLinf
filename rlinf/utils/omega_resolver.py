@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import torch
 from omegaconf import OmegaConf
 
@@ -28,14 +26,6 @@ def omegaconf_register():
     OmegaConf.register_new_resolver("int_div", lambda x, y: x // y)
     OmegaConf.register_new_resolver("subtract", lambda x, y: x - y)
     OmegaConf.register_new_resolver("not", lambda x: not bool(x))
-    OmegaConf.register_new_resolver(
-        "runtime_env",
-        lambda name, default=None: os.environ.get(name, default)
-        if default is not None
-        else os.environ[name],
-        replace=True,
-        use_cache=False,
-    )
     OmegaConf.register_new_resolver(
         "torch.dtype", lambda dtype_name: getattr(torch, dtype_name), replace=True
     )
