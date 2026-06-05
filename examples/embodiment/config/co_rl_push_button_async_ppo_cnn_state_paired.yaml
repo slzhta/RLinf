@@ -41,7 +41,7 @@ cluster:
 runner:
   task_type: embodied
   logger:
-    log_path: "../results"
+    log_path: ${runtime_env:RLINF_LOG_PATH}
     project_name: rlinf
     experiment_name: "co_rl_push_button_async_ppo_cnn_state"
     logger_backends: ["tensorboard"]
