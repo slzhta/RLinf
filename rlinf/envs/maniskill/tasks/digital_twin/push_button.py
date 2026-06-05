@@ -67,7 +67,7 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         )
         qpos[env_idx, :7] = ik_qpos
         qpos[env_idx, -2:] = self.CLOSED_GRIPPER_QPOS
-        self.agent.reset(qpos)
+        self.agent.reset(qpos[env_idx])
         self.agent.robot.set_pose(sapien.Pose(self.ROBOT_INITIAL_POSITION))
         self.sync_gpu_articulation_state()
 
