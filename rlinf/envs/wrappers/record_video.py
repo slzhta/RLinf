@@ -78,9 +78,7 @@ class RecordVideo(gym.Wrapper):
         self._num_envs = getattr(env, "num_envs", 1)
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._save_futures: list[Future] = []
-        self.record_interval = getattr(video_cfg, "record_interval", 1)
-        self._episode_count = 0
-        self._recording = True
+        self._recording = False
 
         if fps is not None:
             self._fps = fps
@@ -364,8 +362,6 @@ class RecordVideo(gym.Wrapper):
     def reset(self, *args, **kwargs):
         """Reset env and record the initial frame."""
         obs, info = self.env.reset(*args, **kwargs)
-        self._episode_count += 1
-        self._recording = (self._episode_count % self.record_interval == 0)
         if self._recording:
             self.add_new_frames(obs, info)
         return obs, info
@@ -417,7 +413,7 @@ class RecordVideo(gym.Wrapper):
 
     def flush_video(self, video_sub_dir: Optional[str] = None):
         """Write buffered frames to an MP4 file (async)."""
-        if not self._recording or not self.render_images:
+        if not self.render_images:
             return
 
         output_dir = os.path.join(
@@ -432,6 +428,12 @@ class RecordVideo(gym.Wrapper):
         self.render_images = []
         self.video_cnt += 1
         self._submit_save(frames, mp4_path)
+
+    def set_recording(self, enabled: bool, clear_buffer: bool = False):
+        """Enable or disable frame collection for the current rollout window."""
+        if clear_buffer:
+            self.render_images = []
+        self._recording = enabled
 
     def _submit_save(self, frames: list[np.ndarray], mp4_path: str) -> None:
         """Submit a background job to save the video."""

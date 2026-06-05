@@ -42,24 +42,6 @@ from rlinf.utils.nested_dict_process import (
 from rlinf.utils.placement import HybridComponentPlacement
 
 
-# TODO(liangzhi): really import part
-# 问题1：在每个 env worker 中，我应该如何知道自己所在的 rank？即如何知道自己是属于sim还是属于real？
-# 方法：每个worker可以通过self._node_group.label 知道自己所在的node
-# 假设每个 node 上可以被放置的环境不同（franka上放real，4090上放sim）
-# 这样通过读取自身的 node 可以决定我的 env_cls
-# 问题2：Number env 分配问题，现在的假设是把环境均分
-# 方法：需要在 config 指定各自的 env 数量，均分的时候各自均分
-# 问题3：映射分配问题，现在的假设是有一个 dst_rank 和 src_rank 的映射，这个不确定怎么改
-# 方法：可能需要给 common mapping 更多的信息（或者单独写一个函数），来进行映射
-# 问题4：global 的问题，现在的最初版本需要设计成什么逻辑？
-# 方法：最初版本可以不考虑太多，我觉得可以是同时 rollout 1个真机 100 步 + 64 个仿真 100 步
-# 然后把这些数据平均分配训练
-# 问题5：除了映射分配问题，如何保证训练的时候是随机混合的（ppo epoch可不是1）
-# common mapping 可以改成每个node都从一部分仿真和一部分真机拿数据（如何保证随机？）
-# basic solution
-# 1. 在 yaml 里给每个种类的环境分配一个总环境数量
-# 2. common mapping 的时候去掉 assert，强制 rollout 和 env 一一对应
-
 class EnvWorker(Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -67,6 +49,8 @@ class EnvWorker(Worker):
         self.cfg = cfg
         self.train_video_cnt = 0
         self.eval_video_cnt = 0
+        self.train_rollout_video_cnt = 0
+        self.eval_rollout_video_cnt = 0
         self.should_stop = False
 
         self.env_list = []
@@ -990,6 +974,36 @@ class EnvWorker(Worker):
                 if not self.cfg.env.eval.auto_reset:
                     self.eval_env_list[i].update_reset_state_ids()
 
+    def _get_video_record_interval(self, mode: Literal["train", "eval"]) -> int:
+        env_cfg = self.cfg.env.train if mode == "train" else self.cfg.env.eval
+        video_cfg = env_cfg.video_cfg
+        interval = getattr(
+            video_cfg,
+            "record_rollout_interval",
+            getattr(video_cfg, "record_interval", 1),
+        )
+        return max(int(interval), 1)
+
+    def begin_rollout_video(self, mode: Literal["train", "eval"] = "train") -> None:
+        if mode == "train":
+            env_cfg = self.cfg.env.train
+            env_list = self.env_list
+            self.train_rollout_video_cnt += 1
+            rollout_video_cnt = self.train_rollout_video_cnt
+        else:
+            env_cfg = self.cfg.env.eval
+            env_list = self.eval_env_list
+            self.eval_rollout_video_cnt += 1
+            rollout_video_cnt = self.eval_rollout_video_cnt
+
+        if not env_cfg.video_cfg.save_video:
+            return
+
+        should_record = rollout_video_cnt % self._get_video_record_interval(mode) == 0
+        for env in env_list:
+            if isinstance(env, RecordVideo):
+                env.set_recording(should_record, clear_buffer=True)
+
     def send_env_batch(
         self,
         rollout_channel: Channel,
@@ -1226,6 +1240,7 @@ class EnvWorker(Worker):
         env_metrics = defaultdict(list)
 
         for epoch in range(self.rollout_epoch):
+            self.begin_rollout_video(mode="train")
             env_outputs = self.bootstrap_step()
             for stage_id in range(self.stage_num):
                 env_output: EnvOutput = env_outputs[stage_id]
@@ -1390,6 +1405,7 @@ class EnvWorker(Worker):
         eval_metrics = defaultdict(list)
 
         for eval_rollout_epoch in range(self.cfg.algorithm.eval_rollout_epoch):
+            self.begin_rollout_video(mode="eval")
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):
                     self.eval_env_list[stage_id].is_start = True
