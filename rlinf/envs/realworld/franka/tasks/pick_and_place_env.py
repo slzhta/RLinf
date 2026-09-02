@@ -28,7 +28,37 @@ from .co_training_base_env import FrankaCoTrainingBaseConfig, FrankaCoTrainingBa
 class FrankaPickAndPlaceConfig(FrankaCoTrainingBaseConfig):
     """Configuration for the real-world tray-to-tray pick-and-place task."""
 
-    reset_ee_pose: np.ndarray | None = None
+    reset_ee_pose: np.ndarray | None = field(
+        default_factory=lambda: np.array(
+            [
+                0.55865414,
+                0.16184118,
+                0.22504874,
+                3.00194796,
+                0.0286977,
+                -0.05498182,
+            ]
+        )
+    )
+    clip_x_range: float = 0.3
+    clip_z_range_high: float = 0.2
+    clip_z_range_low: float = 0.06004874
+    clip_rz_range: float = 0.5
+    clip_rp_range: float = 0.01
+    random_xy_range: float = 0.015
+    max_num_steps: int = 120
+    gripper_min_command_interval: float = 1.0
+    gripper_config: dict[str, float] = field(
+        default_factory=lambda: {
+            "open_width": 0.08,
+            "open_speed": 0.04,
+            "close_width": 0.045,
+            "close_speed": 0.03,
+            "close_force": 15.0,
+            "epsilon_inner": 0.005,
+            "epsilon_outer": 0.01,
+        }
+    )
     enable_downward_contact_failure: bool = False
     contact_force_threshold: float = 5.0
     contact_force_confirmation_samples: int = 1

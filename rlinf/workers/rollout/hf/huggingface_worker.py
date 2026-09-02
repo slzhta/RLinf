@@ -14,6 +14,7 @@
 
 import copy
 import gc
+import os
 from typing import Any, Literal
 
 import numpy as np
@@ -150,9 +151,15 @@ class MultiStepRolloutWorker(Worker):
 
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 
-        if self.cfg.runner.get("ckpt_path", None):
+        initial_checkpoint_path = self.cfg.runner.get("ckpt_path", None)
+        if initial_checkpoint_path and not os.path.exists(initial_checkpoint_path):
+            self.log_warning(
+                "Initial checkpoint is unavailable on this rollout node; "
+                f"skipping local load: {initial_checkpoint_path}"
+            )
+        elif initial_checkpoint_path:
             model_dict = torch.load(
-                self.cfg.runner.ckpt_path,
+                initial_checkpoint_path,
                 map_location="cpu",
                 weights_only=True,
             )

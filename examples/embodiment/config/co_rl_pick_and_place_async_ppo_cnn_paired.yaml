@@ -33,10 +33,7 @@ cluster:
       hardware:
         type: Franka
         configs:
-          - robot_ip: ${oc.env:RLINF_FRANKA_IP}
-            camera_serials:
-              - ${oc.env:RLINF_REAL_WRIST_CAMERA}
-              - ${oc.env:RLINF_REAL_POLICY_CAMERA}
+          - robot_ip: 192.168.1.2
             node_rank: 0
     - label: sim
       node_ranks: 1-2
@@ -54,7 +51,7 @@ runner:
   val_check_interval: -1
   save_interval: 10
   resume_dir: null
-  ckpt_path: ${oc.env:RLINF_PNP_INITIAL_CKPT}
+  ckpt_path: results/maniskill_pnp_bc_r20_s500_uniform_1000step/checkpoints/global_step_450/actor/model_state_dict/full_weights.pt
 
 algorithm:
   sim_real_rl_co_training: true
@@ -119,6 +116,9 @@ env:
     co_training_env_cfg:
       total_num_envs: 1
       num_workers: 1
+      override_cfg:
+        camera_serials: ["141722075170", "233622071355"]
+        target_ee_pose: [0.55865414, 0.16184118, 0.02504874, 3.00194796, 0.0286977, -0.05498182]
   eval:
     total_num_envs: 8
     num_workers: 1
@@ -127,6 +127,9 @@ env:
     co_training_env_cfg:
       total_num_envs: 1
       num_workers: 1
+      override_cfg:
+        camera_serials: ["141722075170", "233622071355"]
+        target_ee_pose: [0.55865414, 0.16184118, 0.02504874, 3.00194796, 0.0286977, -0.05498182]
 
 rollout:
   group_name: RolloutGroup
@@ -135,7 +138,7 @@ rollout:
   pipeline_stage_num: 1
   sync_weight_nccl_max_ctas: 32
   model:
-    model_path: ${oc.env:RLINF_CO_TRAINING_ASSETS}/models
+    model_path: "/mnt/RLinf"
     precision: ${actor.model.precision}
     num_q_heads: 10
   enable_torch_compile: true
@@ -150,7 +153,7 @@ actor:
   seed: 1234
   enable_offload: false
   model:
-    model_path: ${oc.env:RLINF_CO_TRAINING_ASSETS}/models
+    model_path: "/mnt/RLinf"
     add_value_head: true
     add_q_head: false
     use_state: false

@@ -12,15 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from pathlib import Path
 
 _ENV_DIR = Path(__file__).resolve().parent
-DIGITAL_TWIN_ASSET_DIR = Path(
-    os.environ.get("RLINF_CO_TRAINING_ASSETS", _ENV_DIR / "assets")
-)
-if "RLINF_CO_TRAINING_ASSETS" in os.environ:
-    DIGITAL_TWIN_ASSET_DIR /= "digital_twin"
+DIGITAL_TWIN_ASSET_DIR = _ENV_DIR / "assets"
 
 DIGITAL_TWIN_BACKGROUND_IMAGES = {
     "3rdview_camera": str(
