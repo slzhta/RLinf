@@ -1326,20 +1326,27 @@ class PandaPutOnPlateInScene25DigitalTwin(PandaPutOnPlateInScene25):
             rewards = torch.zeros(
                 (self.num_envs,), dtype=torch.float32, device=self.device
             )
-            # consecutive_grasp reward
-            newly_grasped = info["is_src_obj_grasped_current"] & (~self.is_grasped_flag)
-            self.is_grasped_flag = (
-                self.is_grasped_flag | info["is_src_obj_grasped_current"]
+            # Reward a stable grasp once, matching the event-style sparse setup.
+            is_stably_grasped = (
+                info["consecutive_grasp"]
+                if "consecutive_grasp" in info
+                else info["is_src_obj_grasped_current"]
             )
+            newly_grasped = is_stably_grasped & (~self.is_grasped_flag)
+            self.is_grasped_flag = self.is_grasped_flag | is_stably_grasped
             rewards += newly_grasped.float() * 1.0
 
-            # success reward
-            newly_successed = info["success"] & (~self.is_successed_flag)
-            self.is_successed_flag = self.is_successed_flag | info["success"]
+            # Treat pick-and-place success as placed on target and released.
+            placed_and_released = info["success"] & (
+                ~info["is_src_obj_grasped_current"]
+            )
+            was_successed = self.is_successed_flag
+            newly_successed = placed_and_released & (~was_successed)
+            self.is_successed_flag = was_successed | placed_and_released
             rewards += newly_successed.float() * 5.0
 
-            # If already success but current failed, give a negative reward onces
-            failed_after_success = (~info["success"]) & self.is_successed_flag
+            # If already success but current failed, give a negative reward once.
+            failed_after_success = (~placed_and_released) & was_successed
             newly_failed = failed_after_success & (~self.successed_but_failed_flag)
             self.successed_but_failed_flag = (
                 self.successed_but_failed_flag | failed_after_success

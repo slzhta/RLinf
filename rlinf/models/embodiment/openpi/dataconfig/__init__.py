@@ -62,6 +62,9 @@ from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.pnp_dataconfig import (
+    LeRobotPnPDataConfig,
+)
 
 _CONFIGS = [
     TrainConfig(
@@ -396,6 +399,84 @@ _CONFIGS = [
             "checkpoints/jax/pi05_base/params"
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+    TrainConfig(
+        name="pi05_pnp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPnPDataConfig(
+            repo_id="pnp_mp_train_397_lerobot_v2",
+            default_prompt="pick up the cube and place it at the target position",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="/mnt/RLinf/pi05_pnp/assets",
+            ),
+        ),
+        pytorch_weight_path="/mnt/RLinf/lerobot_pi05_base",
+        seed=0,
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=500,
+    ),
+    TrainConfig(
+        name="pi05_pnp_real",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPnPDataConfig(
+            repo_id="pnp_real_success_100_openpi_v2",
+            default_prompt="Pick up the purple cube from the yellow-marked source tray and place it in the white target tray",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="/home/ubuntu/wangyinghan/wangyitao/assets/pi05_pnp_real",
+            ),
+        ),
+        pytorch_weight_path="/mnt/RLinf/lerobot_pi05_base",
+        seed=0,
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=500,
+    ),
+    TrainConfig(
+        name="pi05_pnp_real_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        data=LeRobotPnPDataConfig(
+            repo_id="pnp_real_success_100_openpi_v2",
+            default_prompt="Pick up the purple cube from the yellow-marked source tray and place it in the white target tray",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="/home/ubuntu/wangyinghan/wangyitao/assets/pi05_pnp_real",
+            ),
+        ),
+        pytorch_weight_path="/mnt/RLinf/lerobot_pi05_base",
+        seed=0,
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=500,
     ),
 ]
 

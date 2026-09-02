@@ -179,6 +179,28 @@ class TrajectoryCache:
         self._buffer = new_buffer
         self._traj_num_samples = new_slot_len
 
+    def reserve(self, max_num_samples: int, trajectory: dict) -> None:
+        """Allocate the final cache shape once before bulk loading."""
+        if self.cache:
+            raise RuntimeError("Cannot reserve a populated trajectory cache.")
+        self._traj_num_samples = max_num_samples
+        self._buffer = self._alloc_buffer_like(
+            trajectory, self.max_size * max_num_samples
+        )
+
+    @property
+    def allocated_bytes(self) -> int:
+        """Return bytes allocated by tensor storage in this cache."""
+
+        def tensor_bytes(value: object) -> int:
+            if isinstance(value, torch.Tensor):
+                return value.numel() * value.element_size()
+            if isinstance(value, dict):
+                return sum(tensor_bytes(item) for item in value.values())
+            return 0
+
+        return tensor_bytes(self._buffer)
+
     def get(self, trajectory_id: int) -> Optional[dict]:
         if trajectory_id not in self.cache or self._buffer is None:
             return None
@@ -240,6 +262,7 @@ class TrajectoryReplayBuffer:
         auto_save: bool = False,
         auto_save_path: str = "",
         trajectory_format: str = "pt",
+        cache_all_when_not_saving: bool = True,
     ):
         """
         Initialize trajectory-based replay buffer.
@@ -252,6 +275,8 @@ class TrajectoryReplayBuffer:
             trajectory_format: Storage format ("pt", "pkl")
             sample_window_size: Number of trajectories to sample from for window cache
             auto_save: Whether to automatically save trajectories to disk
+            cache_all_when_not_saving: Keep every in-memory trajectory cacheable when
+                auto-save is disabled. Disable this for read-only disk checkpoints.
         """
         self.trajectory_format = trajectory_format
         self.enable_cache = enable_cache
@@ -259,12 +284,23 @@ class TrajectoryReplayBuffer:
         self.auto_save = auto_save
         self.logger = get_logger()
 
-        if not self.auto_save:
+        if not self.auto_save and cache_all_when_not_saving:
+            if sample_window_size <= 0:
+                raise ValueError(
+                    "An in-memory replay buffer requires sample_window_size > 0."
+                )
             self.logger.warning(
                 f"auto_save is disabled, enabling cache with size {sample_window_size}"
             )
             self.enable_cache = True
             cache_size = sample_window_size
+        elif not self.auto_save and not self.enable_cache:
+            raise ValueError(
+                "auto_save=False requires enable_cache=True when "
+                "cache_all_when_not_saving=False."
+            )
+        if self.enable_cache and cache_size <= 0:
+            raise ValueError("enable_cache=True requires cache_size > 0.")
 
         # Auto-save path (only used when auto_save is enabled)
         if self.auto_save:
@@ -298,7 +334,7 @@ class TrajectoryReplayBuffer:
 
         # Flattened trajectory cache for fast sampling
         self._flat_trajectory_cache = (
-            TrajectoryCache(cache_size) if enable_cache else None
+            TrajectoryCache(cache_size) if self.enable_cache else None
         )
 
         # Async save executor for add_trajectories
@@ -314,6 +350,14 @@ class TrajectoryReplayBuffer:
         self._window_cache_cumulative_ends: list[int] = []
         self._window_cache_cumulative_ends_tensor: Optional[torch.Tensor] = None
         self._window_cache_total_samples = 0
+        self._sampling_weight_cache: dict[
+            str, tuple[int, tuple[int, ...], torch.Tensor]
+        ] = {}
+        self._sample_permutation = torch.empty(0, dtype=torch.long)
+        self._sample_permutation_cursor = 0
+        self._sample_permutation_version: Optional[int] = None
+        self._sample_permutation_window_size: Optional[int] = None
+        self._sample_permutation_total = 0
 
         # Buffer state
         self.size = 0  # Current number of trajectories
@@ -536,26 +580,44 @@ class TrajectoryReplayBuffer:
     def sample(
         self,
         num_chunks: int = 0,
+        sampling_weight_key: Optional[str] = None,
+        without_replacement: bool = False,
     ) -> dict[str, torch.Tensor]:
         """
         Sample chunks (transitions) from the buffer.
 
         Args:
-            num_chunks: Minimum number of chunks (transitions) to return
+            num_chunks: Minimum number of chunks (transitions) to return.
+            sampling_weight_key: Optional dot-separated path to non-negative
+                per-transition sampling weights. Weighted batches are sampled
+                without replacement.
+            without_replacement: Sample unique transitions for an unweighted batch.
 
         Returns:
             Dictionary with rollout batch format [B, ...]
         """
         assert num_chunks > 0
-        return self.sample_chunks(num_chunks)
+        return self.sample_chunks(
+            num_chunks,
+            sampling_weight_key,
+            without_replacement=without_replacement,
+        )
 
-    def sample_chunks(self, num_chunks: int) -> dict[str, torch.Tensor]:
+    def sample_chunks(
+        self,
+        num_chunks: int,
+        sampling_weight_key: Optional[str] = None,
+        without_replacement: bool = False,
+    ) -> dict[str, torch.Tensor]:
         """
         Sample chunks (transitions) from the buffer.
         Each chunk is a single transition from any trajectory.
 
         Args:
-            num_chunks: Number of chunks (transitions) to sample
+            num_chunks: Number of chunks (transitions) to sample.
+            sampling_weight_key: Optional dot-separated path to non-negative
+                per-transition sampling weights.
+            without_replacement: Sample unique transitions for an unweighted batch.
 
         Returns:
             Dictionary with batch format [B, ...] where B = num_chunks
@@ -603,19 +665,52 @@ class TrajectoryReplayBuffer:
         if window_total_samples == 0:
             return {}
 
-        if num_chunks > window_total_samples:
-            num_chunks = window_total_samples
+        if (
+            sampling_weight_key is not None or without_replacement
+        ) and num_chunks > window_total_samples:
+            raise ValueError(
+                f"Cannot sample {num_chunks} unique transitions from a window "
+                f"containing {window_total_samples} transitions."
+            )
 
-        # Sample chunk indices directly from total samples
-        sample_ids = torch.randint(
-            low=0,
-            high=window_total_samples,
-            size=(num_chunks,),
-            generator=self.random_generator,
-        )
+        if sampling_weight_key is None and not without_replacement:
+            sample_ids = torch.randint(
+                low=0,
+                high=window_total_samples,
+                size=(num_chunks,),
+                generator=self.random_generator,
+            )
+        elif sampling_weight_key is None:
+            sample_ids = self._sample_unique_epoch_indices(
+                num_chunks=num_chunks,
+                window_total_samples=window_total_samples,
+                window_size=window_size,
+            )
+        else:
+            sampling_weights = self._get_window_sampling_weights(
+                window_ids, sampling_weight_key
+            )
+            if sampling_weights.numel() != window_total_samples:
+                raise RuntimeError(
+                    f"Sampling weights at {sampling_weight_key!r} contain "
+                    f"{sampling_weights.numel()} entries, expected "
+                    f"{window_total_samples}."
+                )
+            positive_count = int((sampling_weights > 0).sum().item())
+            if positive_count < num_chunks:
+                raise ValueError(
+                    f"Cannot sample {num_chunks} unique transitions from "
+                    f"{positive_count} positive weights at "
+                    f"{sampling_weight_key!r}."
+                )
+            sample_ids = torch.multinomial(
+                sampling_weights,
+                num_samples=num_chunks,
+                replacement=False,
+                generator=self.random_generator,
+            )
 
         # Convert global sample indices to per-trajectory local indices
-        grouped_indices: dict[str, list[tuple[int, int]]] = {}
         cumulative_ends_tensor = self._window_cache_cumulative_ends_tensor
         if cumulative_ends_tensor is None or cumulative_ends_tensor.numel() == 0:
             return {}
@@ -629,16 +724,6 @@ class TrajectoryReplayBuffer:
             [torch.zeros(1, dtype=torch.long), cumulative_ends_tensor[:-1]]
         )
         local_sample_indices = sample_ids_tensor - starts[bucket_indices]
-
-        for idx_in_batch in range(sample_ids_tensor.numel()):
-            idx = int(bucket_indices[idx_in_batch])
-            if idx >= len(window_ids):
-                continue
-            trajectory_id = window_ids[idx]
-            local_sample_idx = int(local_sample_indices[idx_in_batch])
-            grouped_indices.setdefault(trajectory_id, []).append(
-                (idx_in_batch, local_sample_idx)
-            )
 
         # Vectorized sampling: use cache buffer directly, load misses and gather once.
         batch = None
@@ -708,6 +793,107 @@ class TrajectoryReplayBuffer:
             )
 
         return batch if batch is not None else {}
+
+    def _sample_unique_epoch_indices(
+        self,
+        num_chunks: int,
+        window_total_samples: int,
+        window_size: int,
+    ) -> torch.Tensor:
+        """Draw from one shuffled epoch before starting the next one."""
+        permutation_is_stale = (
+            self._sample_permutation_version != self._index_version
+            or self._sample_permutation_window_size != window_size
+            or self._sample_permutation_total != window_total_samples
+        )
+        if permutation_is_stale:
+            self._sample_permutation = torch.randperm(
+                window_total_samples, generator=self.random_generator
+            )
+            self._sample_permutation_cursor = 0
+            self._sample_permutation_version = self._index_version
+            self._sample_permutation_window_size = window_size
+            self._sample_permutation_total = window_total_samples
+
+        cursor = self._sample_permutation_cursor
+        remaining = window_total_samples - cursor
+        if num_chunks <= remaining:
+            sample_ids = self._sample_permutation[cursor : cursor + num_chunks]
+            self._sample_permutation_cursor += num_chunks
+            return sample_ids
+
+        epoch_tail = self._sample_permutation[cursor:]
+        next_permutation = torch.randperm(
+            window_total_samples, generator=self.random_generator
+        )
+        if epoch_tail.numel() > 0:
+            # Keep the boundary batch unique while preserving every sample in the
+            # new epoch. Tail IDs are merely moved behind the selected prefix.
+            overlaps_tail = torch.isin(next_permutation, epoch_tail)
+            next_permutation = torch.cat(
+                [next_permutation[~overlaps_tail], next_permutation[overlaps_tail]]
+            )
+        prefix_size = num_chunks - epoch_tail.numel()
+        sample_ids = torch.cat([epoch_tail, next_permutation[:prefix_size]])
+        self._sample_permutation = next_permutation
+        self._sample_permutation_cursor = prefix_size
+        return sample_ids
+
+    @staticmethod
+    def _get_nested_tensor(data: dict, path: str) -> torch.Tensor:
+        value: object = data
+        for key in path.split("."):
+            if not isinstance(value, dict) or key not in value:
+                raise KeyError(f"Sampling weight field {path!r} was not found.")
+            value = value[key]
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"Sampling weight field {path!r} must be a tensor.")
+        return value
+
+    def _get_window_sampling_weights(
+        self, window_ids: list[int], path: str
+    ) -> torch.Tensor:
+        """Return flattened sampling weights for a trajectory window."""
+        cache_entry = self._sampling_weight_cache.get(path)
+        window_key = tuple(window_ids)
+        if (
+            cache_entry is not None
+            and cache_entry[0] == self._index_version
+            and cache_entry[1] == window_key
+        ):
+            return cache_entry[2]
+
+        weights = []
+        cache = self._flat_trajectory_cache
+        for trajectory_id in window_ids:
+            flat = cache.get(trajectory_id) if cache is not None else None
+            if flat is None:
+                model_weights_id = self._trajectory_index[trajectory_id][
+                    "model_weights_id"
+                ]
+                trajectory = self._load_trajectory(trajectory_id, model_weights_id)
+                flat = self._flatten_trajectory(trajectory)
+
+            trajectory_weights = self._get_nested_tensor(flat, path).reshape(-1)
+            expected = int(self._trajectory_index[trajectory_id]["num_samples"])
+            if trajectory_weights.numel() != expected:
+                raise ValueError(
+                    f"Trajectory {trajectory_id} has {trajectory_weights.numel()} "
+                    f"weights at {path!r}, expected {expected}."
+                )
+            weights.append(trajectory_weights.to(dtype=torch.float32, device="cpu"))
+
+        flat_weights = torch.cat(weights) if weights else torch.empty(0)
+        if not torch.all(torch.isfinite(flat_weights)):
+            raise ValueError(f"Sampling weights at {path!r} must be finite.")
+        if torch.any(flat_weights < 0):
+            raise ValueError(f"Sampling weights at {path!r} must be non-negative.")
+        self._sampling_weight_cache[path] = (
+            self._index_version,
+            window_key,
+            flat_weights,
+        )
+        return flat_weights
 
     def _flatten_trajectory(self, trajectory: Trajectory) -> dict:
         flat: dict[str, object] = {}
@@ -889,6 +1075,11 @@ class TrajectoryReplayBuffer:
         """Return total number of samples across all trajectories."""
         return self._total_samples
 
+    @property
+    def trajectory_ids(self) -> tuple[int, ...]:
+        """Return the ordered trajectory IDs in the active dataset partition."""
+        return tuple(self._trajectory_id_list)
+
     def is_ready(self, min_size: int) -> bool:
         """Check if buffer has enough samples for training."""
         return self.size >= min_size
@@ -911,6 +1102,15 @@ class TrajectoryReplayBuffer:
         self.size = 0
         self._total_samples = 0
         self._trajectory_counter = 0
+        self._index_version += 1
+        self._window_cache_size = None
+        self._window_cache_version = None
+        self._window_cache_ids = []
+        self._window_cache_cumulative_ends = []
+        self._window_cache_cumulative_ends_tensor = None
+        self._window_cache_total_samples = 0
+        self._sampling_weight_cache.clear()
+        self._reset_sample_permutation()
 
     def get_stats(self) -> dict[str, float]:
         """Get buffer statistics."""
@@ -920,8 +1120,56 @@ class TrajectoryReplayBuffer:
             "cache_size": len(self._flat_trajectory_cache.cache)
             if self._flat_trajectory_cache
             else 0,
+            "cache_capacity": self._flat_trajectory_cache.max_size
+            if self._flat_trajectory_cache
+            else 0,
+            "cache_bytes": self._flat_trajectory_cache.allocated_bytes
+            if self._flat_trajectory_cache
+            else 0,
         }
         return stats
+
+    def sampling_state_dict(self) -> dict[str, object]:
+        """Return the deterministic replay-sampling state."""
+        return {
+            "seed": self.seed,
+            "random_generator_state": self.random_generator.get_state().clone(),
+            "sample_permutation": self._sample_permutation.clone(),
+            "sample_permutation_cursor": self._sample_permutation_cursor,
+            "sample_permutation_window_size": self._sample_permutation_window_size,
+            "sample_permutation_total": self._sample_permutation_total,
+        }
+
+    def load_sampling_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Restore replay sampling without reloading trajectory storage."""
+        generator_state = state_dict.get("random_generator_state")
+        if not isinstance(generator_state, torch.Tensor):
+            raise ValueError("Replay sampling state is missing random_generator_state.")
+        self.seed = state_dict.get("seed", self.seed)
+        self.random_generator.set_state(generator_state.cpu())
+        permutation = state_dict.get("sample_permutation")
+        if isinstance(permutation, torch.Tensor):
+            self._sample_permutation = permutation.to(dtype=torch.long, device="cpu")
+            self._sample_permutation_cursor = int(
+                state_dict.get("sample_permutation_cursor", 0)
+            )
+            self._sample_permutation_window_size = state_dict.get(
+                "sample_permutation_window_size"
+            )
+            self._sample_permutation_total = int(
+                state_dict.get("sample_permutation_total", permutation.numel())
+            )
+            self._sample_permutation_version = self._index_version
+        else:
+            self._reset_sample_permutation()
+
+    def _reset_sample_permutation(self) -> None:
+        """Invalidate the shuffled-epoch cursor after replay storage changes."""
+        self._sample_permutation = torch.empty(0, dtype=torch.long)
+        self._sample_permutation_cursor = 0
+        self._sample_permutation_version = None
+        self._sample_permutation_window_size = None
+        self._sample_permutation_total = 0
 
     def save_checkpoint(self, save_path: str):
         """
@@ -1000,6 +1248,7 @@ class TrajectoryReplayBuffer:
         is_distributed: bool = False,
         local_rank: int = 0,
         world_size: int = 1,
+        restore_seed: bool = True,
     ):
         """
         Load buffer state from saved metadata.
@@ -1009,6 +1258,7 @@ class TrajectoryReplayBuffer:
             is_distributed: If True, only load a portion of trajectories based on local_rank and world_size
             local_rank: Rank index (0-based) for partial loading. Only used when is_distributed=True
             world_size: Total number of ranks. Only used when is_distributed=True
+            restore_seed: Restore the dataset writer's RNG seed from metadata.
         """
         metadata_path = os.path.join(load_path, "metadata.json")
         if not os.path.exists(metadata_path):
@@ -1022,7 +1272,7 @@ class TrajectoryReplayBuffer:
             "trajectory_format",
             self.trajectory_format,
         )
-        if "seed" in metadata:
+        if restore_seed and "seed" in metadata:
             self.seed = metadata["seed"]
             self._init_random_generator(self.seed)
 
@@ -1040,6 +1290,29 @@ class TrajectoryReplayBuffer:
         full_trajectory_id_list = [
             int(k) for k in index_data.get("trajectory_id_list", [])
         ]
+        if len(set(full_trajectory_id_list)) != len(full_trajectory_id_list):
+            raise ValueError("Replay checkpoint contains duplicate trajectory IDs.")
+        missing_ids = [
+            trajectory_id
+            for trajectory_id in full_trajectory_id_list
+            if trajectory_id not in full_trajectory_index
+        ]
+        if missing_ids:
+            raise ValueError(
+                f"Replay checkpoint index is missing trajectory IDs: {missing_ids[:5]}."
+            )
+        indexed_total_samples = sum(
+            int(full_trajectory_index[trajectory_id].get("num_samples", 0))
+            for trajectory_id in full_trajectory_id_list
+        )
+        metadata_size = metadata.get("size", len(full_trajectory_id_list))
+        metadata_total_samples = metadata.get("total_samples", indexed_total_samples)
+        if (
+            metadata_size != len(full_trajectory_id_list)
+            or metadata_total_samples != indexed_total_samples
+        ):
+            raise ValueError("Replay checkpoint metadata does not match its index.")
+        self._trajectory_file_path.clear()
 
         # Handle distributed loading
         if is_distributed:
@@ -1098,25 +1371,46 @@ class TrajectoryReplayBuffer:
             self._trajectory_id_list = full_trajectory_id_list
             for trajectory_id in self._trajectory_id_list:
                 self._trajectory_file_path[trajectory_id] = load_path
-            self.size = metadata.get("size", 0)
-            self._total_samples = metadata.get("total_samples", 0)
+            self.size = len(self._trajectory_id_list)
+            self._total_samples = indexed_total_samples
             self._trajectory_counter = metadata.get("trajectory_counter", 0)
 
         if self._flat_trajectory_cache is not None:
             self._flat_trajectory_cache.clear()
             if self._trajectory_id_list:
-                max_cache = self._flat_trajectory_cache.max_size
+                max_cache = min(
+                    self._flat_trajectory_cache.max_size,
+                    len(self._trajectory_id_list),
+                )
+                self._flat_trajectory_cache.max_size = max_cache
                 recent_ids = self._trajectory_id_list[-max_cache:]
-                for trajectory_id in recent_ids:
+                max_num_samples = max(
+                    int(self._trajectory_index[trajectory_id]["num_samples"])
+                    for trajectory_id in recent_ids
+                )
+                for cache_index, trajectory_id in enumerate(recent_ids):
                     model_weights_id = self._trajectory_index[trajectory_id][
                         "model_weights_id"
                     ]
                     trajectory = self._load_trajectory(trajectory_id, model_weights_id)
                     flat_trajectory = self._flatten_trajectory(trajectory)
+                    if cache_index == 0:
+                        self._flat_trajectory_cache.reserve(
+                            max_num_samples, flat_trajectory
+                        )
                     self._flat_trajectory_cache.put(
                         trajectory_id,
                         flat_trajectory,
                     )
+        self._index_version += 1
+        self._window_cache_size = None
+        self._window_cache_version = None
+        self._window_cache_ids = []
+        self._window_cache_cumulative_ends = []
+        self._window_cache_cumulative_ends_tensor = None
+        self._window_cache_total_samples = 0
+        self._sampling_weight_cache.clear()
+        self._reset_sample_permutation()
 
     def clear_cache(self):
         """Clear trajectory cache."""

@@ -69,7 +69,7 @@ class FSDPModelManager:
             "critic_warmup_steps", None
         ) and self._cfg.model.get("add_value_head", False):
             self.critic_warmup_steps = self._cfg.optim.critic_warmup_steps
-        self.store_requires_grad_param_name = []
+        self._actor_optimizer_group_indices: list[int] = []
 
         if cfg.get("tokenizer", {}).get("tokenizer_model", None) is not None:
             self.tokenizer = hf_tokenizer(cfg.tokenizer.tokenizer_model)
@@ -258,9 +258,7 @@ class FSDPModelManager:
         self.model = self._strategy.wrap_model(
             model=module, device_mesh=self._device_mesh
         )
-        self.optimizer = self.build_optimizer(
-            model=self.model, enable_critic_warmup=self.critic_warmup_steps > 0
-        )
+        self.optimizer = self.build_optimizer(model=self.model)
 
         self.lr_scheduler = self.build_lr_scheduler(
             optimizer=self.optimizer, optim_config=self._cfg.optim
@@ -303,9 +301,15 @@ class FSDPModelManager:
         Args:
             load_path: the directory to load checkpoint.
         """
+        trainer_state = self._validate_trainer_state(load_path)
         self._strategy.load_checkpoint(
             self.model, self.optimizer, self.lr_scheduler, load_path
         )
+        if trainer_state is not None:
+            self.optimizer_steps = int(trainer_state.get("optimizer_steps", 0))
+            if self.optimizer_steps >= self.critic_warmup_steps:
+                self.critic_warmup_steps = 0
+        self._repair_legacy_lr_scheduler()
 
     def save_checkpoint(self, save_path: str, step: int = 0) -> None:
         """
@@ -328,6 +332,74 @@ class FSDPModelManager:
             self.lr_scheduler,
             save_path,
         )
+        if self._cfg.get("checkpoint_stage", None) is not None:
+            if (
+                not torch.distributed.is_initialized()
+                or torch.distributed.get_rank() == 0
+            ):
+                os.makedirs(save_path, exist_ok=True)
+                torch.save(
+                    self._trainer_state_dict(),
+                    os.path.join(save_path, "trainer_state.pt"),
+                )
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+    @property
+    def in_critic_warmup(self) -> bool:
+        """Whether actor updates are still disabled for critic initialization."""
+        return self.critic_warmup_steps > self.optimizer_steps
+
+    def _trainer_state_dict(self) -> dict:
+        """Build the small, rank-independent checkpoint compatibility marker."""
+        model_cfg = self._cfg.get("model", {})
+        return {
+            "format_version": 2,
+            "training_stage": self._cfg.get("checkpoint_stage", None),
+            "optimizer_steps": self.optimizer_steps,
+            "action_distribution_version": 1,
+            "continuous_action_distribution": "tanh_normal_v1",
+            "binary_action_indices": tuple(model_cfg.get("binary_action_indices", [])),
+            "binary_action_temperature": float(
+                model_cfg.get("binary_action_temperature", 1.0)
+            ),
+        }
+
+    def _validate_trainer_state(self, load_path: str) -> dict | None:
+        """Validate stage and action semantics before loading optimizer shards."""
+        expected_stage = self._cfg.get("checkpoint_stage", None)
+        if expected_stage is None:
+            return None
+
+        state_path = os.path.join(load_path, "trainer_state.pt")
+        if not os.path.isfile(state_path):
+            raise ValueError(
+                f"Checkpoint {load_path} has no trainer_state.pt compatibility marker."
+            )
+        state = torch.load(state_path, map_location="cpu", weights_only=True)
+        if state.get("format_version") != 2:
+            raise ValueError(f"Unsupported checkpoint format in {state_path}.")
+        if state.get("training_stage") != expected_stage:
+            raise ValueError(
+                f"Checkpoint is not a '{expected_stage}' checkpoint: {load_path}."
+            )
+
+        model_cfg = self._cfg.get("model", {})
+        expected_indices = tuple(model_cfg.get("binary_action_indices", []))
+        expected_temperature = float(model_cfg.get("binary_action_temperature", 1.0))
+        compatible_distribution = (
+            state.get("action_distribution_version") == 1
+            and state.get("continuous_action_distribution") == "tanh_normal_v1"
+            and tuple(state.get("binary_action_indices", ())) == expected_indices
+            and float(state.get("binary_action_temperature", 1.0))
+            == expected_temperature
+        )
+        if not compatible_distribution:
+            raise ValueError(
+                "Checkpoint uses an incompatible action distribution; start a new "
+                "PPO run from a matching BC checkpoint."
+            )
+        return state
 
     def offload_param_and_grad(self, offload_grad: bool = False) -> None:
         """
@@ -374,8 +446,15 @@ class FSDPModelManager:
         Returns:
             A tuple of (grad_norm, lr_list), lr_list contains learning rates for all param groups.
         """
-        self.optimizer_steps += 1
         self.grad_scaler.unscale_(self.optimizer)
+        critic_warmup = self.in_critic_warmup
+        if critic_warmup:
+            for group_index in self._actor_optimizer_group_indices:
+                group = self.optimizer.param_groups[group_index]
+                group["lr"] = 0.0
+                for param in group["params"]:
+                    param.grad = None
+
         grad_norm = self._strategy.clip_grad_norm_(
             model=self.model,
         )
@@ -388,16 +467,53 @@ class FSDPModelManager:
             self.grad_scaler.step(optimizer=self.optimizer)
 
         self.grad_scaler.update()
-
-        if self.critic_warmup_steps > 0:
-            lr_list = [0.0 for _ in self.optimizer.param_groups]
-            if self.optimizer_steps >= self.critic_warmup_steps:
-                self.optimizer = self.build_optimizer(model=self.model)
-                self.critic_warmup_steps = 0
-        else:
-            lr_list = [group["lr"] for group in self.optimizer.param_groups]
+        lr_list = [group["lr"] for group in self.optimizer.param_groups]
+        self.optimizer_steps += 1
+        if critic_warmup and not self.in_critic_warmup:
+            self.critic_warmup_steps = 0
+            expected_lrs = self._expected_optimizer_lrs()
+            for group_index in self._actor_optimizer_group_indices:
+                self.optimizer.param_groups[group_index]["lr"] = expected_lrs[
+                    group_index
+                ]
 
         return grad_norm, lr_list
+
+    def _expected_optimizer_lrs(self) -> list[float]:
+        """Return configured learning rates in optimizer-group order."""
+        actor_indices = set(self._actor_optimizer_group_indices)
+        expected_lrs = []
+        for index, group in enumerate(self.optimizer.param_groups):
+            group_type = group.get("group_type")
+            if group_type == "critic":
+                lr = self._cfg.optim.get("value_lr", self._cfg.optim.lr)
+            elif group_type == "actor_backbone":
+                lr = self._cfg.optim.get("backbone_lr", self._cfg.optim.lr)
+            elif index in actor_indices:
+                lr = self._cfg.optim.lr
+            elif len(self.optimizer.param_groups) == 2 and index == 1:
+                lr = self._cfg.optim.get("value_lr", self._cfg.optim.lr)
+            else:
+                lr = group.get("initial_lr", group["lr"])
+            expected_lrs.append(float(lr))
+        return expected_lrs
+
+    def _repair_legacy_lr_scheduler(self) -> None:
+        """Repair checkpoints whose scheduler only tracked the critic group."""
+        expected_lrs = self._expected_optimizer_lrs()
+        if len(self.lr_scheduler.base_lrs) == len(expected_lrs) and len(
+            self.lr_scheduler._last_lr
+        ) == len(expected_lrs):
+            return
+
+        self._logger.warning(
+            "[FSDP] Repairing legacy learning-rate scheduler parameter groups."
+        )
+        self.lr_scheduler.base_lrs = expected_lrs.copy()
+        self.lr_scheduler._last_lr = expected_lrs.copy()
+        for group, lr in zip(self.optimizer.param_groups, expected_lrs, strict=True):
+            group["lr"] = lr
+            group["initial_lr"] = lr
 
     def build_lr_scheduler(
         self, optimizer: Optimizer, optim_config: DictConfig
@@ -443,7 +559,8 @@ class FSDPModelManager:
 
         Args:
             model: The model to optimize, can be nn.Module, FSDPModule (used in FSDP2) or FSDP.
-            enable_critic_warmup: Whether to enable critic warmup used for value network.
+            enable_critic_warmup: Deprecated compatibility argument. Critic warmup
+                now keeps a stable optimizer and masks actor gradients per step.
 
         Returns:
             Optimizer: The constructed optimizer.
@@ -452,36 +569,33 @@ class FSDPModelManager:
         adam_eps = self._cfg.optim.get("adam_eps", 1e-8)
         weight_decay = self._cfg.optim.get("weight_decay", 1e-2)
 
+        del enable_critic_warmup
         params_actor = []
+        params_backbone = []
         params_critic = []
-
-        if enable_critic_warmup:
-            self._logger.info("[FSDP] Enable critic warmup for value head.")
-            for name, param in model.named_parameters():
-                if param.requires_grad:
-                    self.store_requires_grad_param_name.append(name)
-                    if "value_head" in name or "model.value_head" in name:
-                        params_critic.append(param)
-                        continue
-                    param.requires_grad = False
-
-        else:
-            for name, param in model.named_parameters():
-                if name in self.store_requires_grad_param_name:
-                    param.requires_grad = True
-                if param.requires_grad:
-                    if "value_head" in name or "model.value_head" in name:
-                        params_critic.append(param)
-                    else:
-                        params_actor.append(param)
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "value_head" in name:
+                params_critic.append(param)
+            elif (
+                "resnet_backbone" in name
+                and self._cfg.optim.get("backbone_lr", None) is not None
+            ):
+                params_backbone.append(param)
+            else:
+                params_actor.append(param)
 
         param_groups = []
+        self._actor_optimizer_group_indices = []
         if len(params_actor) > 0:
+            self._actor_optimizer_group_indices.append(len(param_groups))
             param_groups.append(
                 {
                     "params": params_actor,
                     "lr": self._cfg.optim.lr,
                     "betas": betas,
+                    "group_type": "actor",
                 }
             )
         if len(params_critic) > 0:
@@ -490,8 +604,21 @@ class FSDPModelManager:
                     "params": params_critic,
                     "lr": self._cfg.optim.value_lr,
                     "betas": betas,
+                    "group_type": "critic",
                 }
             )
+        if len(params_backbone) > 0:
+            self._actor_optimizer_group_indices.append(len(param_groups))
+            param_groups.append(
+                {
+                    "params": params_backbone,
+                    "lr": self._cfg.optim.backbone_lr,
+                    "betas": betas,
+                    "group_type": "actor_backbone",
+                }
+            )
+        if not param_groups:
+            raise ValueError("Cannot build an optimizer without trainable parameters.")
         optimizer = torch.optim.AdamW(
             param_groups,
             eps=adam_eps,

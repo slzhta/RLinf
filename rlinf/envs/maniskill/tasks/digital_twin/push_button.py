@@ -530,37 +530,39 @@ class PushButtonEnv(DigitalTwinBaseEnv):
         return [self.TASK_DESCRIPTION] * self.num_envs
 
     def _pad_and_resize_images(self, images: torch.Tensor) -> torch.Tensor:
+        """Center-square crop and resize images to match real-camera preprocessing."""
         if images.dim() != 4:
-            raise ValueError(f"Expected image tensor with shape [B, H, W, C], got {images.shape}.")
+            raise ValueError(
+                "Expected image tensor with shape [B, H, W, C], "
+                f"got {images.shape}."
+            )
 
         _, height, width, _ = images.shape
-        if height < width:
-            pad = width - height
-            pad_top = pad // 2
-            pad_bottom = pad - pad_top
-            pad_left = 0
-            pad_right = 0
-        else:
-            pad = height - width
-            pad_left = pad // 2
-            pad_right = pad - pad_left
-            pad_top = 0
-            pad_bottom = 0
+        crop_size = min(height, width)
+        start_y = (height - crop_size) // 2
+        start_x = (width - crop_size) // 2
 
-        nchw_images = images.permute(0, 3, 1, 2).to(torch.float32)
-        padded_images = F.pad(
-            nchw_images,
-            (pad_left, pad_right, pad_top, pad_bottom),
-            mode="constant",
-            value=0.0,
-        )
+        cropped_images = images[
+            :,
+            start_y : start_y + crop_size,
+            start_x : start_x + crop_size,
+            :,
+        ]
+
+        nchw_images = cropped_images.permute(0, 3, 1, 2).to(torch.float32)
         resized_images = F.interpolate(
-            padded_images,
+            nchw_images,
             size=(self.OUTPUT_IMAGE_SIZE, self.OUTPUT_IMAGE_SIZE),
             mode="bilinear",
             align_corners=False,
         )
-        return resized_images.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
+        return (
+            resized_images
+            .round()
+            .clamp(0, 255)
+            .to(torch.uint8)
+            .permute(0, 2, 3, 1)
+        )
 
     def reset(self, seed=None, options=None):
         raw_obs, infos = super().reset(seed=seed, options=options)

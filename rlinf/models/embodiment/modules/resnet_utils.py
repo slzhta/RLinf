@@ -105,11 +105,13 @@ class ResNetEncoder(nn.Module):
         self.num_spatial_blocks = 8
         self.pooling_method = "spatial_learned_embeddings"
         self.use_pretrain = True
+        self.freeze_backbone = bool(self.encoder_cfg.get("freeze_backbone", True))
 
         self.resnet_backbone = ResNet10(pre_pooling=self.use_pretrain)
         if self.use_pretrain:
             self._load_pretrained_weights()
-            self._freeze_backbone_weights()
+            if self.freeze_backbone:
+                self._freeze_backbone_weights()
 
         sample_embed = self.resnet_backbone(sample_x)
         _, channel, height, width = sample_embed.shape
@@ -121,7 +123,10 @@ class ResNetEncoder(nn.Module):
                 channel=channel,
                 num_features=self.num_spatial_blocks,
             )
-            self.dropout = nn.Dropout(0.1)
+            dropout = float(self.encoder_cfg.get("dropout", 0.1))
+            if not 0.0 <= dropout < 1.0:
+                raise ValueError(f"encoder dropout must be in [0, 1), got {dropout}.")
+            self.dropout = nn.Dropout(dropout)
 
         # final linear
         self.mlp = nn.Sequential(
@@ -147,7 +152,7 @@ class ResNetEncoder(nn.Module):
     def forward(self, x):
         x = self.resnet_backbone(x)
 
-        if self.use_pretrain:
+        if self.freeze_backbone:
             x = x.detach()
 
         if self.pooling_method == "spatial_learned_embeddings":

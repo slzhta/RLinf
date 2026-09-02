@@ -16,17 +16,20 @@ from gymnasium.envs.registration import register
 
 from rlinf.envs.realworld.franka.franka_env import FrankaEnv as FrankaEnv
 from rlinf.envs.realworld.franka.tasks.bottle import BottleEnv as BottleEnv
+from rlinf.envs.realworld.franka.tasks.co_training_base_env import (
+    FrankaCoTrainingBaseEnv as FrankaCoTrainingBaseEnv,
+)
 from rlinf.envs.realworld.franka.tasks.franka_bin_relocation import (
     FrankaBinRelocationEnv as FrankaBinRelocationEnv,
 )
 from rlinf.envs.realworld.franka.tasks.peg_insertion_env import (
     PegInsertionEnv as PegInsertionEnv,
 )
+from rlinf.envs.realworld.franka.tasks.pick_and_place_env import (
+    FrankaPickAndPlaceEnv as FrankaPickAndPlaceEnv,
+)
 from rlinf.envs.realworld.franka.tasks.push_button_env import (
     FrankaPushButtonEnv as FrankaPushButtonEnv,
-)
-from rlinf.envs.realworld.franka.tasks.co_training_base_env import (
-    FrankaCoTrainingBaseEnv as FrankaCoTrainingBaseEnv
 )
 
 register(
@@ -47,11 +50,16 @@ register(
 register(id="BottleEnv-v1", entry_point="rlinf.envs.realworld.franka.tasks:BottleEnv")
 
 register(
-    id="FrankaCoTrainingBaseEnv-v1", 
-    entry_point="rlinf.envs.realworld.franka.tasks:FrankaCoTrainingBaseEnv"
+    id="FrankaCoTrainingBaseEnv-v1",
+    entry_point="rlinf.envs.realworld.franka.tasks:FrankaCoTrainingBaseEnv",
 )
 
 register(
     id="FrankaPushButtonEnv-v1",
     entry_point="rlinf.envs.realworld.franka.tasks:FrankaPushButtonEnv",
+)
+
+register(
+    id="FrankaPickAndPlaceEnv-v1",
+    entry_point="rlinf.envs.realworld.franka.tasks:FrankaPickAndPlaceEnv",
 )

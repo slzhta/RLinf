@@ -33,7 +33,10 @@ class Quat2EulerWrapper(gym.ObservationWrapper):
     def observation(self, observation):
         # convert tcp pose from quat to euler
         tcp_pose = observation["state"]["tcp_pose"]
-        observation["state"]["tcp_pose"] = np.concatenate(
-            (tcp_pose[:3], R.from_quat(tcp_pose[3:].copy()).as_euler("xyz"))
+        euler = (
+            R.from_quat(tcp_pose[3:].copy())
+            .as_euler("xyz")
+            .astype(tcp_pose.dtype, copy=False)
         )
+        observation["state"]["tcp_pose"] = np.concatenate((tcp_pose[:3], euler))
         return observation

@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 from rlinf.envs.realworld.common.wrappers import (
     GelloIntervention,
     GripperCloseEnv,
+    HumanPnPRewardDoneWrapper,
     KeyboardRewardDoneMultiStageWrapper,
     KeyboardRewardDoneWrapper,
     Quat2EulerWrapper,
@@ -64,6 +65,7 @@ class RealWorldEnv(gym.Env):
         self.group_size = cfg.group_size
         self.main_image_key = cfg.main_image_key
         self.include_states_in_obs = bool(getattr(cfg, "include_states_in_obs", True))
+        self.state_keys = list(cfg.get("state_keys", []))
 
         self._init_env()
 
@@ -114,6 +116,12 @@ class RealWorldEnv(gym.Env):
                 env = KeyboardRewardDoneMultiStageWrapper(env)
             elif self.cfg.keyboard_reward_wrapper == "single_stage":
                 env = KeyboardRewardDoneWrapper(env)
+            elif self.cfg.keyboard_reward_wrapper == "pnp_human":
+                feedback_cfg = OmegaConf.to_container(
+                    self.cfg.get("human_feedback_cfg", OmegaConf.create({})),
+                    resolve=True,
+                )
+                env = HumanPnPRewardDoneWrapper(env, **feedback_cfg)
 
         if self.cfg.get("use_relative_frame", True):
             env = RelativeFrame(env)
@@ -184,6 +192,7 @@ class RealWorldEnv(gym.Env):
         self.returns = np.zeros(self.num_envs)
         self.intervened_once = np.zeros(self.num_envs, dtype=bool)
         self.intervened_steps = np.zeros(self.num_envs, dtype=int)
+        self.aborted_once = np.zeros(self.num_envs, dtype=bool)
 
     def _reset_metrics(self, env_idx=None):
         if env_idx is not None:
@@ -196,6 +205,7 @@ class RealWorldEnv(gym.Env):
             self._elapsed_steps[mask] = 0
             self.intervened_once[mask] = False
             self.intervened_steps[mask] = 0
+            self.aborted_once[mask] = False
         else:
             self.prev_step_reward[:] = 0
             self.success_once[:] = False
@@ -204,6 +214,7 @@ class RealWorldEnv(gym.Env):
             self._elapsed_steps[:] = 0
             self.intervened_once[:] = False
             self.intervened_steps[:] = 0
+            self.aborted_once[:] = False
 
     def _record_metrics(
         self,
@@ -211,6 +222,7 @@ class RealWorldEnv(gym.Env):
         terminations,
         success_current_step,
         intervene_current_step,
+        abort_current_step,
         infos,
     ):
         episode_info = {}
@@ -218,6 +230,7 @@ class RealWorldEnv(gym.Env):
         self.success_once = self.success_once | success_current_step
         self.intervened_once = self.intervened_once | intervene_current_step
         self.intervened_steps += intervene_current_step.astype(int)
+        self.aborted_once = self.aborted_once | abort_current_step
 
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
@@ -225,6 +238,7 @@ class RealWorldEnv(gym.Env):
         episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
         episode_info["intervened_once"] = self.intervened_once
         episode_info["intervened_steps"] = self.intervened_steps
+        episode_info["aborted"] = self.aborted_once.copy()
         episode_info["success_no_intervened"] = self.success_once.copy() & (
             ~self.intervened_once
         )
@@ -250,9 +264,19 @@ class RealWorldEnv(gym.Env):
 
         # Process states
         full_states = []
-        raw_states = OrderedDict(sorted(raw_obs["state"].items()))
-        for value in raw_states.values():
-            full_states.append(value)
+        if self.state_keys:
+            missing_keys = [
+                key for key in self.state_keys if key not in raw_obs["state"]
+            ]
+            if missing_keys:
+                raise KeyError(
+                    f"Configured state_keys are missing from the observation: {missing_keys}. "
+                    f"Available keys: {list(raw_obs['state'])}."
+                )
+            full_states.extend(raw_obs["state"][key] for key in self.state_keys)
+        else:
+            raw_states = OrderedDict(sorted(raw_obs["state"].items()))
+            full_states.extend(raw_states.values())
         if self.include_states_in_obs:
             full_states = np.concatenate(full_states, axis=-1)
             obs["states"] = full_states
@@ -282,7 +306,8 @@ class RealWorldEnv(gym.Env):
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
-        truncations = self.elapsed_steps >= self.cfg.max_episode_steps
+        timeout_truncations = self.elapsed_steps >= self.cfg.max_episode_steps
+        truncations = np.logical_or(truncations, timeout_truncations)
 
         obs = self._wrap_obs(raw_obs)
         step_reward = self._calc_step_reward(_reward)
@@ -292,12 +317,17 @@ class RealWorldEnv(gym.Env):
             for env_id in range(self.num_envs):
                 if infos["intervene_action"][env_id] is not None:
                     intervene_flag[env_id] = True
+        abort_flag = np.asarray(
+            infos.get("discard_trajectory", np.zeros(self.num_envs, dtype=bool)),
+            dtype=bool,
+        )
 
         infos = self._record_metrics(
             step_reward,
             terminations,
             success_current_step,
             intervene_flag,
+            abort_flag,
             infos,
         )
         if self.ignore_terminations:
@@ -338,6 +368,7 @@ class RealWorldEnv(gym.Env):
 
         raw_chunk_intervene_actions = []
         raw_chunk_intervene_flag = []
+        raw_chunk_abort_flags = []
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
@@ -348,6 +379,15 @@ class RealWorldEnv(gym.Env):
             if "intervene_action" in infos:
                 raw_chunk_intervene_actions.append(infos["intervene_action"])
                 raw_chunk_intervene_flag.append(infos["intervene_flag"])
+            raw_chunk_abort_flags.append(
+                torch.as_tensor(
+                    infos.get(
+                        "discard_trajectory",
+                        np.zeros(self.num_envs, dtype=bool),
+                    ),
+                    dtype=torch.bool,
+                )
+            )
 
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
@@ -360,12 +400,19 @@ class RealWorldEnv(gym.Env):
         raw_chunk_truncations = torch.stack(
             raw_chunk_truncations, dim=1
         )  # [num_envs, chunk_steps]
+        raw_chunk_abort_flags = torch.stack(raw_chunk_abort_flags, dim=1)
 
         past_terminations = raw_chunk_terminations.any(dim=1)
         past_truncations = raw_chunk_truncations.any(dim=1)
         past_dones = torch.logical_or(past_terminations, past_truncations)
 
         infos_last = infos_list[-1] if infos_list else {}
+        if self.auto_reset or self.ignore_terminations:
+            chunk_abort_flags = torch.zeros_like(raw_chunk_abort_flags)
+            chunk_abort_flags[:, -1] = raw_chunk_abort_flags.any(dim=1)
+        else:
+            chunk_abort_flags = raw_chunk_abort_flags
+        infos_last["abort_flags"] = chunk_abort_flags
         if raw_chunk_intervene_actions:
             infos_last["intervene_action"] = torch.stack(
                 raw_chunk_intervene_actions, dim=1

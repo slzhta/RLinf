@@ -21,3 +21,29 @@ rlinf/envs/maniskill/assets
 rlinf/envs/maniskill/tasks/digital_twin/assets
 PKG-INFO
 *.egg-info/
+
+# Local experiment outputs and datasets.
+/results/
+/tmp/
+/maniskill_pick_and_place_ppo_cnn/
+/maniskill_pick_and_place_ppo_cnn_state/
+/pnp_raw_dataset/
+/pnp_lerobot_dataset/
+/pytorch_checkpoints/
+/wandb/
+/lerobot-*.tar.gz
+
+# Local backup snapshots.
+*.bak
+*.bak.*
+*.bak_*
+*.before_*
+
+# Local OpenPI checkouts and failed environments.
+/openpi-jax-venv.failed.*/
+/openpi_jax_clean/
+/openpi_a4_eval/
+/third_party/openpi/
+
+# Locally generated collection datasets.
+/data_collection/shuangqing_real*/

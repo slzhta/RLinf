@@ -1,6 +1,5 @@
 import os
 
-
 _ENV_DIR = os.path.dirname(os.path.abspath(__file__))
 _ASSET_DIR = os.path.join(_ENV_DIR, "assets")
 
@@ -28,12 +27,22 @@ PANDA_UMI_CAMERA_POSES = {
     "3rdview_camera": {
         "mount_link": "panda_link0",
         "p": [1.028399986258626, 0.03181203390946734, 0.5650221695897678],
-        "q": [0.017373342776650636, -0.4402130067970881, 0.01681990116140459, 0.8975676946795448],
+        "q": [
+            0.017373342776650636,
+            -0.4402130067970881,
+            0.01681990116140459,
+            0.8975676946795448,
+        ],
     },
     "hand_camera": {
         "mount_link": "camera_link",
         "p": [-0.004933241890954809, 0.019370738865599802, 0.006932944573748325],
-        "q": [0.9997672000023046, 0.0021878508838338684, -0.015248489267897954, -0.01510770277405003],
+        "q": [
+            0.9997672000023046,
+            0.0021878508838338684,
+            -0.015248489267897954,
+            -0.01510770277405003,
+        ],
     },
 }
 
@@ -54,10 +63,18 @@ PANDA_UMI_CAMERA_SETTINGS = {
     },
 }
 
-from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
+from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (  # noqa: E402
     DigitalTwinBaseEnv,
 )
-from rlinf.envs.maniskill.tasks.digital_twin.push_button import PushButtonEnv
+from rlinf.envs.maniskill.tasks.digital_twin.pick_and_place import (  # noqa: E402
+    PickAndPlaceDigitalTwinEnv,
+)
+from rlinf.envs.maniskill.tasks.digital_twin.push_button import (  # noqa: E402
+    PushButtonEnv,
+)
+from rlinf.envs.maniskill.tasks.digital_twin.push_to_zone import (  # noqa: E402
+    PushToZoneDigitalTwinEnv,
+)
 
 __all__ = [
     "DIGITAL_TWIN_BACKGROUND_IMAGES",
@@ -65,5 +82,7 @@ __all__ = [
     "PANDA_UMI_CAMERA_POSES",
     "PANDA_UMI_CAMERA_SETTINGS",
     "PANDA_UMI_REFERENCE_QPOS",
+    "PickAndPlaceDigitalTwinEnv",
     "PushButtonEnv",
+    "PushToZoneDigitalTwinEnv",
 ]

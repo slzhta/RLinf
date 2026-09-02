@@ -31,6 +31,7 @@ class FrankaPushButtonConfig(FrankaCoTrainingBaseConfig):
     )
     use_target_controller: bool = True
     enable_gripper_penalty: bool = False
+    enable_inner_safety_box : bool = False
     joint_reset_qpos: list[float] = field(
         default_factory=lambda: [0.0, np.pi / 8, 0.0, -np.pi * 5 / 8, 0.0, np.pi * 3 / 4, np.pi / 4]
     )

@@ -53,6 +53,13 @@ class FSDPStrategy(FSDPStrategyBase):
         Returns:
             - FSDP: The wrapped FSDP model.
         """
+        if self.world_size == 1:
+            if self.logger is not None:
+                self.logger.info(
+                    "[Single GPU] Bypassing FSDP wrapper and using the original model"
+                )
+            return model
+
         mixed_precision_config = self.cfg.fsdp_config.mixed_precision
         param_dtype = torch_dtype_from_precision(mixed_precision_config.param_dtype)
         reduce_dtype = torch_dtype_from_precision(mixed_precision_config.reduce_dtype)
@@ -109,6 +116,9 @@ class FSDPStrategy(FSDPStrategyBase):
         Returns:
             Dict: The full state dict of the optimizer.
         """
+        if not isinstance(model, FSDP):
+            return optimizer.state_dict()
+
         with FSDP.state_dict_type(
             module=model, state_dict_type=StateDictType.FULL_STATE_DICT
         ):
@@ -238,6 +248,14 @@ class FSDPStrategy(FSDPStrategyBase):
         device = torch.device(f"{Worker.torch_device_type}:{os.environ['LOCAL_RANK']}")
         max_norm = float(self.cfg.optim.clip_grad)
         norm_type = float(norm_type)
+        if not isinstance(model, FSDP):
+            return (
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, norm_type)
+                .detach()
+                .cpu()
+                .item()
+            )
+
         all_handles = getattr(model, "_all_handles", None)
         if all_handles is None:
             raise RuntimeError("Expected FSDP root module with `_all_handles`.")
@@ -333,19 +351,24 @@ class FSDPStrategy(FSDPStrategyBase):
         return grad_norm
 
     def before_micro_batch(
-        self, model: FSDP, is_last_micro_batch: bool
+        self, model: nn.Module, is_last_micro_batch: bool
     ) -> ContextManager:
         """
         Context manager for handling gradient synchronization during micro-batches for FSDP.
         it will disable gradient synchronization for non-last micro-batches to reduce all-reduce count.
 
         Args:
-            - model (FSDP): The FSDP wrapped model.
+            - model (nn.Module): The wrapped or single-process model.
             - is_last_micro_batch (bool): Whether the current micro-batch is the last one
 
         Returns:
             - ContextManager: The context manager for gradient synchronization.
         """
-        if self.cfg.fsdp_config.enable_gradient_accumulation:
-            return model.no_sync() if not is_last_micro_batch else nullcontext()
+        should_defer_sync = (
+            self.cfg.fsdp_config.enable_gradient_accumulation
+            and not is_last_micro_batch
+        )
+        no_sync = getattr(model, "no_sync", None)
+        if should_defer_sync and callable(no_sync):
+            return no_sync()
         return nullcontext()

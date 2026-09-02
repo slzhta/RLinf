@@ -1,11 +1,9 @@
-import os
-from typing import Any, Optional, Union, Sequence
+from typing import Any, Sequence, Union
 
 import cv2
 import numpy as np
 import sapien
 import torch
-
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import Camera, CameraConfig
 from mani_skill.utils import common
@@ -19,7 +17,6 @@ from rlinf.envs.maniskill.tasks.digital_twin import (
 )
 from rlinf.envs.maniskill.tasks.digital_twin.robots import PandaUMI
 from rlinf.envs.maniskill.tasks.digital_twin.scene import TableSceneBuilder
-
 
 ForegroundActor = Actor | Articulation | Link
 
@@ -55,6 +52,8 @@ class DigitalTwinBaseEnv(BaseEnv):
         robot_uids="panda_umi",
         robot_init_qpos_noise=0.02,
         overwrite_rgb_in_obs: bool = True,
+        use_hand_camera: bool = True,
+        synchronize_render: bool = True,
         controller_alignment: dict[str, Any] | None = None,
         reset_alignment: dict[str, Any] | None = None,
         task_alignment: dict[str, Any] | None = None,
@@ -80,6 +79,8 @@ class DigitalTwinBaseEnv(BaseEnv):
 
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.overwrite_rgb_in_obs = overwrite_rgb_in_obs
+        self.use_hand_camera = use_hand_camera
+        self.synchronize_render = synchronize_render
         self.controller_alignment = self._normalize_controller_alignment_arg(
             controller_alignment
         )
@@ -367,6 +368,7 @@ class DigitalTwinBaseEnv(BaseEnv):
             self._control_mode,
             initial_pose=sapien.Pose(p=[-0.615, 0, 0]),
             controller_alignment=self.controller_alignment,
+            enable_hand_camera=self.use_hand_camera,
         )
 
     def _load_scene(self, options: dict):
@@ -499,7 +501,7 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     def _ensure_randomization_info(self):
         if len(self._parallel_randomization_info) != self.num_envs:
-            self._parallel_randomization_info = [dict() for _ in range(self.num_envs)]
+            self._parallel_randomization_info = [{} for _ in range(self.num_envs)]
 
     def _set_randomization_value(self, scene_idx: int, key: str, value: Any):
         self._ensure_randomization_info()
@@ -686,7 +688,7 @@ class DigitalTwinBaseEnv(BaseEnv):
         if camera_name not in self._sensors:
             raise KeyError(f"Unknown camera: {camera_name}")
         return Pose.create(self._sensors[camera_name].camera.get_local_pose(), device=self.device).sp
-    
+
     # overwrite for get segmentation for env.get_obs()
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
         # This overrides ManiSkill's default camera capture path so fused observations
@@ -730,7 +732,7 @@ class DigitalTwinBaseEnv(BaseEnv):
                 apply_texture_transforms=apply_texture_transforms,
             )
 
-        if self.backend.render_device.is_cuda():
+        if self.synchronize_render and self.backend.render_device.is_cuda():
             torch.cuda.synchronize()
         return sensor_obs
 
@@ -747,7 +749,7 @@ class DigitalTwinBaseEnv(BaseEnv):
         if background.ndim == 3:
             background = background.unsqueeze(0)
         if background.shape[0] == 1 and rgb.shape[0] > 1:
-            background = background.repeat(rgb.shape[0], 1, 1, 1)
+            background = background.expand(rgb.shape[0], -1, -1, -1)
         return background.to(device=rgb.device, dtype=rgb.dtype)
 
     def _build_camera_image_obs(self, camera_name: str, camera_obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -813,11 +815,11 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     def _get_obs_extra(self, info: dict):
         return {}
-    
+
     def step(self, action: Union[None, np.ndarray, torch.Tensor, dict]):
         if isinstance(action, np.ndarray):
             action = torch.from_numpy(action).to(self.device)
         else:
             action = action.to(self.device)
-        
+
         return super().step(action)

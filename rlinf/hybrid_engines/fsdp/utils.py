@@ -411,7 +411,7 @@ def get_lr_scheduler(
     elif lr_scheduler == "torch_constant":
         from torch.optim.lr_scheduler import ConstantLR
 
-        return ConstantLR(optimizer, factor=1)
+        return ConstantLR(optimizer, factor=1, last_epoch=last_epoch)
 
     elif lr_scheduler == "torch_cosine":
         from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -420,6 +420,7 @@ def get_lr_scheduler(
             optimizer,
             T_max=num_training_steps,
             eta_min=1e-6,
+            last_epoch=last_epoch,
         )
     else:
         raise NotImplementedError(f"Scheduler type {lr_scheduler} is not supported")

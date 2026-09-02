@@ -388,20 +388,24 @@ def compute_ppo_critic_loss(
 
 
 @register_policy_loss("decoupled_actor_critic")
-def compute_decoupled_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
+def compute_decoupled_ppo_actor_critic_loss(
+    value_loss_coef: float = 1.0, **kwargs
+) -> tuple[torch.Tensor, dict]:
     """Compute decoupled PPO actor+critic loss."""
     metrics_data = {}
     actor_loss, actor_metrics_data = compute_decoupled_ppo_actor_loss(**kwargs)
     critic_loss, critic_metrics_data = compute_ppo_critic_loss(**kwargs)
 
-    loss = actor_loss + critic_loss
+    loss = actor_loss + value_loss_coef * critic_loss
     metrics_data.update(actor_metrics_data)
     metrics_data.update(critic_metrics_data)
     return loss, metrics_data
 
 
 @register_policy_loss("actor_critic")
-def compute_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
+def compute_ppo_actor_critic_loss(
+    value_loss_coef: float = 1.0, **kwargs
+) -> tuple[torch.Tensor, dict]:
     """
     Compute PPO actor loss function.
 
@@ -424,7 +428,7 @@ def compute_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
     actor_loss, actor_metrics_data = compute_ppo_actor_loss(**kwargs)
     critic_loss, critic_metrics_data = compute_ppo_critic_loss(**kwargs)
 
-    loss = actor_loss + critic_loss
+    loss = actor_loss + value_loss_coef * critic_loss
     metrics_data.update(actor_metrics_data)
     metrics_data.update(critic_metrics_data)
 

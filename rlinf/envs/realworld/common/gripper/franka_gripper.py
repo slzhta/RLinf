@@ -62,28 +62,58 @@ class FrankaGripper(BaseGripper):
 
     # ── BaseGripper interface ────────────────────────────────────────
 
-    def open(self, speed: float = 0.3) -> None:
+    # def open(self, speed: float = 0.3) -> None:
+    #     msg = self._MoveActionGoal()
+    #     msg.goal.width = 0.09
+    #     msg.goal.speed = speed
+    #     self._ros.put_channel(self._move_channel, msg)
+    #     self._is_open_flag = True
+
+    # def close(self, speed: float = 0.3, force: float = 130.0) -> None:
+    #     msg = self._GraspActionGoal()
+    #     msg.goal.width = 0.01
+    #     msg.goal.speed = speed
+    #     msg.goal.epsilon.inner = 1
+    #     msg.goal.epsilon.outer = 1
+    #     msg.goal.force = force
+    #     self._ros.put_channel(self._grasp_channel, msg)
+    #     self._is_open_flag = False
+
+    # def move(self, position: float, speed: float = 0.3) -> None:
+    #     msg = self._MoveActionGoal()
+    #     msg.goal.width = float(position / (255 * 10))
+    #     msg.goal.speed = speed
+    #     self._ros.put_channel(self._move_channel, msg)
+    def open(self, speed: float = 0.04) -> None:
         msg = self._MoveActionGoal()
-        msg.goal.width = 0.09
+        msg.goal.width = 0.08
         msg.goal.speed = speed
         self._ros.put_channel(self._move_channel, msg)
         self._is_open_flag = True
 
-    def close(self, speed: float = 0.3, force: float = 130.0) -> None:
+    def close(
+        self,
+        speed: float = 0.03,
+        force: float = 15.0,
+        width: float = 0.045,
+    ) -> None:
         msg = self._GraspActionGoal()
-        msg.goal.width = 0.01
+        msg.goal.width = width
         msg.goal.speed = speed
-        msg.goal.epsilon.inner = 1
-        msg.goal.epsilon.outer = 1
+        msg.goal.epsilon.inner = 0.005
+        msg.goal.epsilon.outer = 0.010
         msg.goal.force = force
         self._ros.put_channel(self._grasp_channel, msg)
         self._is_open_flag = False
 
-    def move(self, position: float, speed: float = 0.3) -> None:
+    def move(self, position: float, speed: float = 0.04) -> None:
         msg = self._MoveActionGoal()
-        msg.goal.width = float(position / (255 * 10))
+        msg.goal.width = float(
+            np.clip(position / 255.0 * 0.08, 0.0, 0.08)
+        )
         msg.goal.speed = speed
         self._ros.put_channel(self._move_channel, msg)
+    # changed for pnp task
 
     @property
     def position(self) -> float:

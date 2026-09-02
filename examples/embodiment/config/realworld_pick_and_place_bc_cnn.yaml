@@ -1,0 +1,155 @@
+# Offline single-view CNN behavior cloning from successful real-world PnP demos.
+defaults:
+  - env/maniskill_pick_and_place_co_rl@env.train
+  - env/maniskill_pick_and_place_co_rl@env.eval
+  - model/cnn_policy@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH,./results}
+    project_name: rlinf
+    experiment_name: realworld_pick_and_place_bc_cnn_single_view
+    logger_backends: [tensorboard]
+  max_epochs: 300
+  max_steps: 300
+  only_eval: false
+  eval_before_training: false
+  val_check_interval: -1
+  save_interval: 50
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  dagger:
+    init_beta: 0.0
+    beta_schedule: exponential
+    beta_decay: 1.0
+    beta_min: 0.0
+    only_save_expert: true
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  gamma: 0.0
+  update_epoch: 1
+  adv_type: gae
+  loss_type: embodied_dagger
+  sampling_params:
+    do_sample: false
+    temperature_train: 1.0
+    temperature_eval: -1.0
+    top_k: 0
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+  replay_buffer:
+    enable_cache: true
+    cache_size: 54
+    min_buffer_size: 32
+    sample_window_size: 0
+    sampling_weight_key: forward_inputs.sample_weight
+    sample_without_replacement: false
+    load_path: ${oc.env:RLINF_REAL_PNP_DATA,./data_collection/shuangqing_real_bc_single_view}/replay/train
+    manifest_path: ${oc.env:RLINF_REAL_PNP_DATA,./data_collection/shuangqing_real_bc_single_view}/replay/train/collection_summary.json
+    required_data_format_version: 3
+    required_num_trajectories: 54
+    auto_save: false
+
+env:
+  group_name: EnvGroup
+  train:
+    total_num_envs: 1
+    num_workers: 1
+    include_states_in_obs: false
+    max_steps_per_rollout_epoch: 0
+    video_cfg:
+      save_video: false
+  eval:
+    total_num_envs: 1
+    num_workers: 1
+    include_states_in_obs: false
+    video_cfg:
+      save_video: false
+
+rollout:
+  group_name: RolloutGroup
+  backend: huggingface
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_prev_infos: false
+  model:
+    model_path: /mnt/RLinf
+    precision: ${actor.model.precision}
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+actor:
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 128
+  global_batch_size: 512
+  seed: 1234
+  enable_offload: false
+  enable_drq: true
+  model:
+    model_path: /mnt/RLinf
+    add_value_head: true
+    add_q_head: false
+    use_state: false
+    state_dim: 0
+    action_dim: 7
+    image_num: 1
+    initial_logstd: -2.0
+    logstd_range: [-3.0, -1.5]
+    binary_action_indices: [6]
+    binary_action_temperature: 1.0
+    action_std_scale: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 1.0]
+    bc_action_loss_weights: [1.0, 1.0, 2.0, 0.1, 0.1, 0.1, 2.0]
+    bc_smooth_l1_beta: 0.1
+    encoder_config:
+      dropout: 0.0
+      freeze_backbone: false
+  optim:
+    lr: 3.0e-4
+    backbone_lr: 1.0e-5
+    value_lr: 2.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1.0e-6
+    clip_grad: 1.0
+    lr_scheduler: cosine
+    lr_warmup_steps: 10
+    min_lr_rate: 0.1
+    total_training_steps: ${runner.max_steps}
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: no_shard
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

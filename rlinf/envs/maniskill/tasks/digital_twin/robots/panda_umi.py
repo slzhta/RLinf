@@ -1,10 +1,10 @@
 # TODO(liangzhi): There may have somethin to change
-import sapien
-import numpy as np
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import sapien
 from mani_skill.agents.controllers import deepcopy_dict
 from mani_skill.agents.registration import register_agent
 from mani_skill.agents.robots.panda.panda import Panda
@@ -62,17 +62,21 @@ class PandaUMI(Panda):
         self,
         *args,
         controller_alignment: dict[str, Any] | None = None,
+        enable_hand_camera: bool = True,
         **kwargs,
     ):
         self._controller_alignment_cfg = _normalize_controller_alignment_config(
             controller_alignment
         )
+        self.enable_hand_camera = enable_hand_camera
         super().__init__(*args, **kwargs)
 
     @property
     def _sensor_configs(self):
         from rlinf.envs.maniskill.tasks.digital_twin import PANDA_UMI_CAMERA_SETTINGS
 
+        if not self.enable_hand_camera:
+            return []
         camera_name = "hand_camera"
         camera_settings = PANDA_UMI_CAMERA_SETTINGS[camera_name]
         return [

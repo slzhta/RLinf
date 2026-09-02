@@ -145,10 +145,7 @@ class RecordVideo(gym.Wrapper):
             return []
 
         if isinstance(obs, dict):
-            image_src = self._get_image_from_dict(obs)
-            if image_src is None:
-                return []
-            return self._split_image_source(image_src)
+            return self._extract_dict_frame_batches(obs)
 
         if isinstance(obs, (list, tuple)):
             if len(obs) == 0:
@@ -156,10 +153,7 @@ class RecordVideo(gym.Wrapper):
             if isinstance(obs[0], dict):
                 frames = []
                 for item in obs:
-                    image_src = self._get_image_from_dict(item)
-                    if image_src is None:
-                        continue
-                    batches = self._split_image_source(image_src)
+                    batches = self._extract_dict_frame_batches(item)
                     if batches:
                         frames.append(batches[0])
                 return frames
@@ -176,6 +170,42 @@ class RecordVideo(gym.Wrapper):
         if isinstance(obs, np.ndarray):
             return self._split_image_source(obs)
         return []
+
+    def _extract_dict_frame_batches(self, obs: dict) -> list[list[np.ndarray]]:
+        """Extract main frames and optionally tile auxiliary camera views."""
+        image_src = self._get_image_from_dict(obs)
+        if image_src is None:
+            return []
+        main_batches = self._split_image_source(image_src)
+        if not self.video_cfg.get("include_extra_views", False):
+            return main_batches
+
+        extra_src = obs.get("extra_view_images")
+        if extra_src is None:
+            return main_batches
+        extra_images = self._to_numpy(extra_src)
+        if extra_images.ndim == 4:
+            extra_images = extra_images[:, None]
+        if extra_images.ndim != 5:
+            return main_batches
+        if extra_images.shape[2] in (1, 3, 4) and extra_images.shape[-1] not in (
+            1,
+            3,
+            4,
+        ):
+            extra_images = np.transpose(extra_images, (0, 1, 3, 4, 2))
+
+        combined_batches = []
+        for main_images in main_batches:
+            if len(main_images) != extra_images.shape[0]:
+                return main_batches
+            combined_batches.append(
+                [
+                    tile_images([main_image, *list(extra_images[env_id])], nrows=1)
+                    for env_id, main_image in enumerate(main_images)
+                ]
+            )
+        return combined_batches
 
     def _split_image_source(self, image_src: Any) -> list[list[np.ndarray]]:
         """Normalize common image tensor layouts into frame batches."""

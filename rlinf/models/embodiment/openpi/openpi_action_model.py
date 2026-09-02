@@ -487,12 +487,25 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             processed_obs["observation/state_gripper"] = state[:, 6:7]
         else:
             processed_obs["observation/state"] = env_obs["states"]
-        # wrist image observation
-        if env_obs["wrist_images"] is not None:
-            processed_obs["observation/wrist_image"] = env_obs["wrist_images"]
-        # extra view image observation
-        if env_obs["extra_view_images"] is not None:
-            processed_obs["observation/extra_view_image"] = env_obs["extra_view_images"]
+        # Wrist image observation.
+        # Real-world environments expose secondary cameras as
+        # extra_view_images with shape [B, N, C, H, W].
+        wrist_images = env_obs["wrist_images"]
+        extra_view_images = env_obs["extra_view_images"]
+
+        if wrist_images is not None:
+            processed_obs["observation/wrist_image"] = wrist_images
+        elif extra_view_images is not None:
+            if extra_view_images.ndim != 5 or extra_view_images.shape[1] < 1:
+                raise ValueError(
+                    "Expected extra_view_images with shape [B, N, C, H, W], "
+                    f"got {tuple(extra_view_images.shape)}"
+                )
+            processed_obs["observation/wrist_image"] = extra_view_images[:, 0]
+
+        # Preserve extra views for models that consume them directly.
+        if extra_view_images is not None:
+            processed_obs["observation/extra_view_image"] = extra_view_images
         # store used keys
         return processed_obs
 
