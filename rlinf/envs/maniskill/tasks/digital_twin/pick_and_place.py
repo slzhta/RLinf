@@ -78,7 +78,8 @@ class PickAndPlaceDigitalTwinEnv(DigitalTwinBaseEnv):
     OPEN_GRIPPER_QPOS = 0.04
     DEFAULT_OBJECT_RANDOM_XY_RANGE = 0.01
     TASK_DESCRIPTION = (
-        "pick up the purple cube from the taped tray and place it in the plain tray"
+        "Pick up the purple cube from the yellow-marked source tray and place "
+        "it in the white target tray"
     )
     DEFAULT_TRAY_GROUP_CENTER = np.array(
         [-0.12, 0.01, PLATE_DEPTH / 2.0],
