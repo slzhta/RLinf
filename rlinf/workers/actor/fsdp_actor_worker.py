@@ -65,6 +65,7 @@ from rlinf.utils.distributed import (
 )
 from rlinf.utils.metric_utils import (
     append_to_dict,
+    compute_abort_loss_mask,
     compute_loss_mask,
     compute_rollout_metrics,
     compute_split_num,
@@ -86,6 +87,7 @@ from rlinf.utils.utils import (
     get_loss_agg_func,
     masked_mean,
     reshape_entropy,
+    reshape_entropy_mask,
     retrieve_model_state_dict_in_cpu,
 )
 from rlinf.workers.rollout.utils import RankMapper
@@ -1114,8 +1116,33 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             model = super().model_provider_func()
 
         if self.cfg.runner.get("ckpt_path", None):
-            model_dict = torch.load(self.cfg.runner.ckpt_path)
-            model.load_state_dict(model_dict)
+            model_dict = torch.load(
+                self.cfg.runner.ckpt_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+            excluded_keys = tuple(
+                self.cfg.actor.get("initial_checkpoint_exclude_keys", [])
+            )
+            unknown_keys = set(excluded_keys) - (
+                set(model_dict) & set(model.state_dict())
+            )
+            if unknown_keys:
+                raise ValueError(
+                    "Initial checkpoint exclusions are not shared model/checkpoint "
+                    f"keys: {sorted(unknown_keys)}"
+                )
+            for key in excluded_keys:
+                model_dict.pop(key)
+            incompatible = model.load_state_dict(model_dict, strict=not excluded_keys)
+            if set(incompatible.missing_keys) != set(excluded_keys) or (
+                incompatible.unexpected_keys
+            ):
+                raise ValueError(
+                    "Initial checkpoint mismatch beyond configured exclusions: "
+                    f"missing={incompatible.missing_keys}, "
+                    f"unexpected={incompatible.unexpected_keys}"
+                )
 
         return model
 
@@ -1570,18 +1597,32 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if len(batches) == 1:
             return batches[0]
 
+        common_keys = set(batches[0])
+        for batch in batches[1:]:
+            common_keys.intersection_update(batch)
+
         merged: dict[str, torch.Tensor] = {}
         for key, value in batches[0].items():
+            if key not in common_keys:
+                continue
             if isinstance(value, torch.Tensor):
-                tensors = [batch[key] for batch in batches if key in batch]
-                if tensors:
-                    merged[key] = torch.cat(tensors, dim=1)
-            elif isinstance(value, dict):
-                child_batches = [batch[key] for batch in batches if key in batch]
-                if child_batches:
-                    merged[key] = self._concat_rollout_batches_along_batch_dim(
-                        child_batches
+                tensors = [batch[key] for batch in batches]
+                if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+                    raise ValueError(
+                        f"Rollout field {key} has inconsistent value types across "
+                        "co-training domains."
                     )
+                merged[key] = torch.cat(tensors, dim=1)
+            elif isinstance(value, dict):
+                child_batches = [batch[key] for batch in batches]
+                if not all(isinstance(batch, dict) for batch in child_batches):
+                    raise ValueError(
+                        f"Rollout field {key} has inconsistent value types across "
+                        "co-training domains."
+                    )
+                merged[key] = self._concat_rollout_batches_along_batch_dim(
+                    child_batches
+                )
             else:
                 raise ValueError(f"Unsupported rollout batch value type for key {key}.")
         return merged
@@ -1643,6 +1684,20 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
             rollout_batch["loss_mask"] = loss_mask
             rollout_batch["loss_mask_sum"] = loss_mask_sum
+
+        abort_flags = rollout_batch.pop("abort_flags", None)
+        if abort_flags is not None:
+            abort_loss_mask, _ = compute_abort_loss_mask(
+                rollout_batch["dones"], abort_flags
+            )
+            if self.cfg.algorithm.reward_type == "chunk_level":
+                abort_loss_mask = abort_loss_mask.any(dim=-1, keepdim=True)
+            if rollout_batch.get("loss_mask", None) is not None:
+                abort_loss_mask &= rollout_batch["loss_mask"]
+            rollout_batch["loss_mask"] = abort_loss_mask
+            rollout_batch["loss_mask_sum"] = abort_loss_mask.sum(
+                dim=(0, 2), keepdim=True
+            ).expand_as(abort_loss_mask)
 
         # filter data by rewards
         if self.cfg.algorithm.get("filter_rewards", False):
@@ -1949,6 +2004,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "clip_ratio_low": self.cfg.algorithm.clip_ratio_low,
                         "value_clip": self.cfg.algorithm.get("value_clip", None),
                         "huber_delta": self.cfg.algorithm.get("huber_delta", None),
+                        "value_loss_coef": self.cfg.algorithm.get(
+                            "value_loss_coef", 1.0
+                        ),
                         "loss_mask": loss_mask,
                         "loss_mask_sum": loss_mask_sum,
                         "max_episode_steps": self.cfg.env.train.max_episode_steps,
@@ -1972,7 +2030,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             action_dim=self.cfg.actor.model.get("action_dim", 7),
                             batch_size=output_dict["logprobs"].shape[0],
                         )
-                        entropy_loss = masked_mean(entropy, mask=loss_mask)
+                        entropy_mask = reshape_entropy_mask(
+                            loss_mask,
+                            entropy_type=self.cfg.algorithm.entropy_type,
+                            batch_size=output_dict["logprobs"].shape[0],
+                        )
+                        entropy_loss = masked_mean(entropy, mask=entropy_mask)
                         loss -= self.cfg.algorithm.entropy_bonus * entropy_loss
                     metrics_data["actor/entropy_loss"] = entropy_loss.detach().item()
 

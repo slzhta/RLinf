@@ -47,6 +47,7 @@ class FrankaController(Worker):
         ros_pkg: str = "serl_franka_controllers",
         gripper_type: str = "franka",
         gripper_connection: Optional[str] = None,
+        gripper_config: Optional[dict[str, float]] = None,
     ):
         """Launch a FrankaController on the specified worker's node.
 
@@ -66,7 +67,7 @@ class FrankaController(Worker):
         cluster = Cluster()
         placement = NodePlacementStrategy(node_ranks=[node_rank])
         return FrankaController.create_group(
-            robot_ip, ros_pkg, gripper_type, gripper_connection
+            robot_ip, ros_pkg, gripper_type, gripper_connection, gripper_config
         ).launch(
             cluster=cluster,
             placement_strategy=placement,
@@ -79,6 +80,7 @@ class FrankaController(Worker):
         ros_pkg: str = "serl_franka_controllers",
         gripper_type: str = "franka",
         gripper_connection: Optional[str] = None,
+        gripper_config: Optional[dict[str, float]] = None,
     ):
         super().__init__()
         self._logger = get_logger()
@@ -116,6 +118,7 @@ class FrankaController(Worker):
             gripper_type=gripper_type,
             ros=self._ros,
             port=gripper_connection,
+            **(gripper_config or {}),
         )
 
         # roslaunch processes

@@ -17,6 +17,7 @@ from .gello_intervention import GelloIntervention
 from .gripper_close import GripperCloseEnv
 from .relative_frame import RelativeFrame
 from .reward_done_wrapper import (
+    HumanPnPRewardDoneWrapper,
     KeyboardRewardDoneMultiStageWrapper,
     KeyboardRewardDoneWrapper,
 )
@@ -25,6 +26,7 @@ from .spacemouse_intervention import SpacemouseIntervention
 __all__ = [
     "GelloIntervention",
     "GripperCloseEnv",
+    "HumanPnPRewardDoneWrapper",
     "KeyboardRewardDoneMultiStageWrapper",
     "KeyboardRewardDoneWrapper",
     "Quat2EulerWrapper",

@@ -345,10 +345,43 @@ class FSDPStrategyBase(ABC):
                         f"[Checkpoint] loading DCP checkpoint from {dcp_load_path}"
                     )
 
-                dcp.load(
-                    {"fsdp_checkpoint": training_state},
-                    checkpoint_id=dcp_load_path,
-                )
+                try:
+                    dcp.load(
+                        {"fsdp_checkpoint": training_state},
+                        checkpoint_id=dcp_load_path,
+                    )
+                except BaseException as load_err:
+                    if "initial_lr" not in str(load_err):
+                        raise
+
+                    if hasattr(cls, "logger") and cls.logger is not None:
+                        cls.logger.warning(
+                            "[Checkpoint] 'initial_lr' missing in checkpoint; "
+                            "loading it as a legacy checkpoint without LR "
+                            "scheduler state."
+                        )
+
+                    opt_list = (
+                        [optimizers]
+                        if isinstance(optimizers, Optimizer)
+                        else list(optimizers)
+                    )
+                    for opt in opt_list:
+                        for group in opt.param_groups:
+                            group.pop("initial_lr", None)
+
+                    legacy_state = Checkpoint(
+                        model=model,
+                        optimizers=optimizers,
+                        lr_schedulers=[],
+                        opts=opts,
+                        fsdp_version=cls.get_fsdp_version(),
+                        checkpoint_format=checkpoint_format,
+                    )
+                    dcp.load(
+                        {"fsdp_checkpoint": legacy_state},
+                        checkpoint_id=dcp_load_path,
+                    )
         except BaseException as e:
             import traceback
 

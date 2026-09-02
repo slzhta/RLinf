@@ -1,0 +1,88 @@
+env_type: maniskill
+total_num_envs: null
+auto_reset: true
+ignore_terminations: false
+use_rel_reward: false
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: false
+max_steps_per_rollout_epoch: 120
+max_episode_steps: 120
+reward_mode: raw
+wrap_obs_mode: raw
+include_states_in_obs: false
+use_config_control_mode: true
+enable_offload: false
+
+video_cfg:
+  save_video: false
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: PickAndPlaceDigitalTwin-v1
+  num_envs: null
+  obs_mode: rgb+segmentation
+  control_mode: pd_ee_body_target_delta_pose_real
+  sim_backend: gpu
+  sim_config:
+    sim_freq: 500
+    control_freq: 5
+  max_episode_steps: ${env.train.max_episode_steps}
+  sensor_configs:
+    shader_pack: default
+  render_mode: rgb_array
+  reward_mode: dense
+  use_hand_camera: false
+  synchronize_render: false
+  domain_randomization:
+    enabled: false
+    randomize_lighting: false
+    randomize_joint_control: false
+    randomize_joint_stiffness: false
+    randomize_joint_damping: false
+    randomize_joint_force_limit: false
+    randomize_joint_friction: false
+    randomize_joint_drive_mode: false
+    joint_stiffness_scale_range: [0.7, 1.3]
+    joint_damping_scale_range: [0.7, 1.3]
+    joint_force_limit_scale_range: [0.8, 1.2]
+    joint_friction_abs_range: [0.0, 0.3]
+    joint_drive_mode_choices: [force, acceleration]
+  controller_alignment:
+    use_target_controller: true
+    use_zero_one_gripper_action: false
+    target_ee_pose: [0.54515648, 0.03448609, -0.01847301, 3.07488508, -0.01941186, -0.0446862]
+    action_scale: [0.01, 0.05, 1.0]
+    clip_x_range: 0.15
+    clip_y_range: 0.15
+    clip_z_range_high: 0.15
+    clip_z_range_low: 0.025
+    clip_rz_range: 0.5
+    clip_rp_range: 0.01
+    binary_gripper_action: true
+    binary_gripper_threshold: 0.5
+    open_command: 1.0
+    close_command: -1.0
+    enable_random_reset: true
+    reset_position_random_range: [0.015, 0.015, 0.01]
+    random_rz_range: 0.35
+  task_alignment:
+    tray_group_center: [-0.06984352, 0.03448609, 0.0075]
+    tray_center_spacing: 0.18
+    tray_random_xy_range: 0.0
+    object_random_in_source_tray: true
+    object_random_yaw_range: 3.1415927
+    object_tray_margin: 0.005
+    use_dense_reward: false
+    reward_scale: 1.0
+    sparse_grasp_reward: 0.0
+    sparse_lift_reward: 0.0
+    sparse_place_reward: 0.0
+    sparse_success_reward: 1.0
+    sparse_drop_penalty: 0.0
+    success_stability_steps: 3
+    success_max_linear_speed: 0.05
+    success_max_angular_speed: 0.5
+    failure_min_z: -0.02
+    failure_max_xy_distance: 0.4

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import queue
 import threading
 
 
@@ -36,6 +37,7 @@ class KeyboardListener:
 
         self.state_lock = threading.Lock()
         self.latest_data = {"key": None}
+        self._key_events: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.device = self._open_keyboard_device()
 
         self.listener = threading.Thread(
@@ -135,6 +137,8 @@ class KeyboardListener:
                 if event.value in (1, 2):
                     with self.state_lock:
                         self.latest_data["key"] = key
+                    if event.value == 1:
+                        self._key_events.put(key)
                 elif event.value == 0:
                     with self.state_lock:
                         if self.latest_data["key"] == key:
@@ -162,3 +166,15 @@ class KeyboardListener:
         """Returns the latest key pressed."""
         with self.state_lock:
             return self.latest_data["key"]
+
+    def get_key_event(self) -> str | None:
+        """Return the next key-down event without repeating held keys."""
+        try:
+            return self._key_events.get_nowait()
+        except queue.Empty:
+            return None
+
+    def clear_key_events(self) -> None:
+        """Discard queued key events."""
+        while self.get_key_event() is not None:
+            pass

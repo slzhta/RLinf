@@ -80,7 +80,7 @@ class MultiStepRolloutWorker(Worker):
             self.real_total_num_train_envs = self.cfg.env.train.co_training_env_cfg.total_num_envs
             self.sim_total_num_train_envs = self.cfg.env.train.total_num_envs
             self.total_num_train_envs = self.real_total_num_train_envs + self.sim_total_num_train_envs
-            
+
             self.real_total_num_eval_envs = self.cfg.env.eval.co_training_env_cfg.total_num_envs
             self.sim_total_num_eval_envs = self.cfg.env.eval.total_num_envs
             self.total_num_eval_envs = self.real_total_num_eval_envs + self.sim_total_num_eval_envs
@@ -151,8 +151,35 @@ class MultiStepRolloutWorker(Worker):
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 
         if self.cfg.runner.get("ckpt_path", None):
-            model_dict = torch.load(self.cfg.runner.ckpt_path)
-            self.hf_model.load_state_dict(model_dict)
+            model_dict = torch.load(
+                self.cfg.runner.ckpt_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+            excluded_keys = tuple(
+                self.cfg.actor.get("initial_checkpoint_exclude_keys", [])
+            )
+            unknown_keys = set(excluded_keys) - (
+                set(model_dict) & set(self.hf_model.state_dict())
+            )
+            if unknown_keys:
+                raise ValueError(
+                    "Initial checkpoint exclusions are not shared model/checkpoint "
+                    f"keys: {sorted(unknown_keys)}"
+                )
+            for key in excluded_keys:
+                model_dict.pop(key)
+            incompatible = self.hf_model.load_state_dict(
+                model_dict, strict=not excluded_keys
+            )
+            if set(incompatible.missing_keys) != set(excluded_keys) or (
+                incompatible.unexpected_keys
+            ):
+                raise ValueError(
+                    "Initial checkpoint mismatch beyond configured exclusions: "
+                    f"missing={incompatible.missing_keys}, "
+                    f"unexpected={incompatible.unexpected_keys}"
+                )
 
         if self.cfg.rollout.get("expert_model", None):
             expert_model_config = copy.deepcopy(self.cfg.actor.model)

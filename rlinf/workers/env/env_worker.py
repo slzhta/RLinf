@@ -138,7 +138,7 @@ class EnvWorker(Worker):
                 self.eval_num_envs_per_stage = (
                     self.cfg.env.eval.total_num_envs // self._world_size // self.stage_num
                 )
-        
+
         # TODO(liangzhi): 该条件暂时比较特殊，考虑之后去掉
         if self.use_co_training:
             assert self.cfg.env.train.max_steps_per_rollout_epoch == self.cfg.env.train.co_training_env_cfg.max_steps_per_rollout_epoch
@@ -274,9 +274,6 @@ class EnvWorker(Worker):
             return
 
         if env_cfg.env_type == "maniskill":
-            translated_controller_cfg = self._translate_alignment_for_maniskill(
-                controller_cfg
-            )
             init_params = OmegaConf.to_container(
                 env_cfg.get("init_params", OmegaConf.create({})),
                 resolve=True,
@@ -284,7 +281,10 @@ class EnvWorker(Worker):
             existing_controller_cfg = init_params.get("controller_alignment", {})
             merged_controller_cfg = update_nested_cfg({}, existing_controller_cfg)
             merged_controller_cfg = update_nested_cfg(
-                merged_controller_cfg, translated_controller_cfg
+                merged_controller_cfg, controller_cfg
+            )
+            merged_controller_cfg = self._translate_alignment_for_maniskill(
+                merged_controller_cfg
             )
             init_params["controller_alignment"] = merged_controller_cfg
             setattr(env_cfg, "init_params", OmegaConf.create(init_params))
@@ -699,10 +699,13 @@ class EnvWorker(Worker):
             infos["intervene_action"] if "intervene_action" in infos else None
         )
         intervene_flags = infos["intervene_flag"] if "intervene_flag" in infos else None
+        abort_flags = infos.get("abort_flags", torch.zeros_like(chunk_dones))
         if self.cfg.env.train.auto_reset and chunk_dones.any():
-            if "intervene_action" in infos["final_info"]:
-                intervene_actions = infos["final_info"]["intervene_action"]
-                intervene_flags = infos["final_info"]["intervene_flag"]
+            final_info = infos.get("final_info", {})
+            if "intervene_action" in final_info:
+                intervene_actions = final_info["intervene_action"]
+                intervene_flags = final_info["intervene_flag"]
+            abort_flags = final_info.get("abort_flags", abort_flags)
 
         env_output = EnvOutput(
             obs=extracted_obs,
@@ -713,6 +716,7 @@ class EnvWorker(Worker):
             truncations=chunk_truncations,
             intervene_actions=intervene_actions,
             intervene_flags=intervene_flags,
+            abort_flags=abort_flags,
         )
         return env_output, env_info
 
@@ -933,6 +937,10 @@ class EnvWorker(Worker):
             )
 
         adjusted_rewards = rewards.clone()
+        bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
+        if bootstrap_type == "none":
+            return adjusted_rewards
+
         if (
             bootstrap_values is None
             or not self.cfg.env.train.auto_reset
@@ -940,11 +948,14 @@ class EnvWorker(Worker):
         ):
             return adjusted_rewards
 
-        bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
         if bootstrap_type == "standard":
             last_step_truncations = env_output.truncations[:, -1]
-        else:
+        elif bootstrap_type == "always":
             last_step_truncations = env_output.dones[:, -1]
+        else:
+            raise ValueError(
+                f"Unsupported algorithm.bootstrap_type={bootstrap_type!r}."
+            )
 
         if not last_step_truncations.any():
             return adjusted_rewards
@@ -1148,6 +1159,7 @@ class EnvWorker(Worker):
                     else None,
                     intervene_actions=None,
                     intervene_flags=None,
+                    abort_flags=torch.zeros_like(dones),
                 )
                 env_outputs.append(env_output)
         else:
@@ -1164,6 +1176,7 @@ class EnvWorker(Worker):
                     truncations=truncations,
                     intervene_actions=self.last_intervened_info_list[stage_id][0],
                     intervene_flags=self.last_intervened_info_list[stage_id][1],
+                    abort_flags=torch.zeros_like(dones),
                 )
                 env_outputs.append(env_output)
 
@@ -1298,6 +1311,7 @@ class EnvWorker(Worker):
                         truncations=env_output.truncations,
                         terminations=env_output.terminations,
                         rewards=rewards,
+                        abort_flags=env_output.abort_flags,
                     )
                     self.rollout_results[stage_id].append_step_result(chunk_step_result)
                     if rollout_result.save_flags is not None:
@@ -1362,6 +1376,7 @@ class EnvWorker(Worker):
                     truncations=env_output.truncations,
                     terminations=env_output.terminations,
                     rewards=rewards,
+                    abort_flags=env_output.abort_flags,
                 )
                 self.rollout_results[stage_id].append_step_result(chunk_step_result)
 

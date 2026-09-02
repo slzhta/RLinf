@@ -270,6 +270,14 @@ class ManiskillEnv(gym.Env):
         if "fail" in infos:
             self.fail_once = self.fail_once | infos["fail"]
             episode_info["fail_once"] = self.fail_once.clone()
+        for key, value in infos.items():
+            if (
+                key.endswith("_once")
+                and key not in episode_info
+                and isinstance(value, torch.Tensor)
+                and value.shape == self.success_once.shape
+            ):
+                episode_info[key] = value.clone()
         episode_info["return"] = self.returns.clone()
         episode_info["episode_len"] = self.elapsed_steps.clone()
         episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
@@ -283,7 +291,8 @@ class ManiskillEnv(gym.Env):
         options: Optional[dict] = None,
     ):
         if options is None:
-            seed = self.seed
+            if seed is None:
+                seed = self.seed
             options = (
                 {"episode_id": self.reset_state_ids}
                 if self.use_fixed_reset_state_ids

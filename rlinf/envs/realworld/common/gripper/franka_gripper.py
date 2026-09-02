@@ -37,7 +37,17 @@ class FrankaGripper(BaseGripper):
             arm controller).
     """
 
-    def __init__(self, ros):
+    def __init__(
+        self,
+        ros,
+        open_width: float = 0.09,
+        open_speed: float = 0.3,
+        close_width: float = 0.01,
+        close_speed: float = 0.3,
+        close_force: float = 130.0,
+        epsilon_inner: float = 1.0,
+        epsilon_outer: float = 1.0,
+    ):
         from franka_gripper.msg import GraspActionGoal, MoveActionGoal
         from sensor_msgs.msg import JointState
 
@@ -48,6 +58,13 @@ class FrankaGripper(BaseGripper):
         self._position_value: float = 0.0
         self._is_open_flag: bool = True
         self._is_ready_flag: bool = False
+        self._open_width = float(open_width)
+        self._open_speed = float(open_speed)
+        self._close_width = float(close_width)
+        self._close_speed = float(close_speed)
+        self._close_force = float(close_force)
+        self._epsilon_inner = float(epsilon_inner)
+        self._epsilon_outer = float(epsilon_outer)
 
         # ROS channels
         self._move_channel = "/franka_gripper/move/goal"
@@ -62,26 +79,28 @@ class FrankaGripper(BaseGripper):
 
     # ── BaseGripper interface ────────────────────────────────────────
 
-    def open(self, speed: float = 0.3) -> None:
+    def open(self, speed: float | None = None) -> None:
         msg = self._MoveActionGoal()
-        msg.goal.width = 0.09
-        msg.goal.speed = speed
+        msg.goal.width = self._open_width
+        msg.goal.speed = self._open_speed if speed is None else speed
         self._ros.put_channel(self._move_channel, msg)
         self._is_open_flag = True
 
-    def close(self, speed: float = 0.3, force: float = 130.0) -> None:
+    def close(
+        self, speed: float | None = None, force: float | None = None
+    ) -> None:
         msg = self._GraspActionGoal()
-        msg.goal.width = 0.01
-        msg.goal.speed = speed
-        msg.goal.epsilon.inner = 1
-        msg.goal.epsilon.outer = 1
-        msg.goal.force = force
+        msg.goal.width = self._close_width
+        msg.goal.speed = self._close_speed if speed is None else speed
+        msg.goal.epsilon.inner = self._epsilon_inner
+        msg.goal.epsilon.outer = self._epsilon_outer
+        msg.goal.force = self._close_force if force is None else force
         self._ros.put_channel(self._grasp_channel, msg)
         self._is_open_flag = False
 
     def move(self, position: float, speed: float = 0.3) -> None:
         msg = self._MoveActionGoal()
-        msg.goal.width = float(position / (255 * 10))
+        msg.goal.width = float(position / 255 * self._open_width)
         msg.goal.speed = speed
         self._ros.put_channel(self._move_channel, msg)
 

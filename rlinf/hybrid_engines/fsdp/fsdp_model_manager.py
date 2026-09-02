@@ -303,6 +303,36 @@ class FSDPModelManager:
         Args:
             load_path: the directory to load checkpoint.
         """
+        if self.is_weight_offloaded:
+            self.load_param_and_grad(self.device)
+            self.is_weight_offloaded = False
+        if self.is_optimizer_offloaded:
+            self.load_optimizer(self.device)
+            self.is_optimizer_offloaded = False
+
+        meta = self._load_training_meta(load_path)
+        if meta is not None:
+            self.optimizer_steps = int(
+                meta.get("optimizer_steps", self.optimizer_steps)
+            )
+            saved_num_param_groups = int(
+                meta.get("num_param_groups", len(self.optimizer.param_groups))
+            )
+        else:
+            saved_num_param_groups = self._read_ckpt_num_optim_param_groups(load_path)
+
+        if (
+            self.critic_warmup_steps > 0
+            and saved_num_param_groups is not None
+            and saved_num_param_groups > len(self.optimizer.param_groups)
+        ):
+            self._logger.info(
+                "[Checkpoint] Resumed checkpoint is past critic warmup "
+                f"(saved param groups={saved_num_param_groups}); rebuilding the "
+                "optimizer with actor + critic param groups to match."
+            )
+            self._rebuild_optimizer_after_critic_warmup()
+
         self._strategy.load_checkpoint(
             self.model, self.optimizer, self.lr_scheduler, load_path
         )
@@ -328,6 +358,53 @@ class FSDPModelManager:
             self.lr_scheduler,
             save_path,
         )
+
+        self._save_training_meta(save_path)
+
+    def _training_meta_path(self, ckpt_dir: str) -> str:
+        return os.path.join(ckpt_dir, "training_meta.pt")
+
+    def _save_training_meta(self, save_path: str) -> None:
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+            return
+        meta = {
+            "optimizer_steps": self.optimizer_steps,
+            "num_param_groups": len(self.optimizer.param_groups),
+        }
+        os.makedirs(save_path, exist_ok=True)
+        torch.save(meta, self._training_meta_path(save_path))
+
+    def _load_training_meta(self, load_path: str) -> Union[dict, None]:
+        meta_path = self._training_meta_path(load_path)
+        if not os.path.isfile(meta_path):
+            return None
+        return torch.load(meta_path, map_location="cpu", weights_only=False)
+
+    def _read_ckpt_num_optim_param_groups(self, load_path: str) -> Union[int, None]:
+        try:
+            from torch.distributed.checkpoint import FileSystemReader
+
+            dcp_dir = os.path.join(load_path, "dcp_checkpoint")
+            dcp_path = dcp_dir if os.path.isdir(dcp_dir) else load_path
+
+            metadata = FileSystemReader(dcp_path).read_metadata()
+            max_group_idx = -1
+            for fqn in metadata.state_dict_metadata.keys():
+                marker = "param_groups."
+                pos = fqn.find(marker)
+                if pos == -1:
+                    continue
+                rest = fqn[pos + len(marker) :]
+                idx_str = rest.split(".", 1)[0]
+                if idx_str.isdigit():
+                    max_group_idx = max(max_group_idx, int(idx_str))
+            return max_group_idx + 1 if max_group_idx >= 0 else None
+        except BaseException as e:
+            self._logger.warning(
+                "[Checkpoint] Could not infer optimizer param-group count "
+                f"from DCP metadata: {e}"
+            )
+            return None
 
     def offload_param_and_grad(self, offload_grad: bool = False) -> None:
         """
@@ -392,12 +469,23 @@ class FSDPModelManager:
         if self.critic_warmup_steps > 0:
             lr_list = [0.0 for _ in self.optimizer.param_groups]
             if self.optimizer_steps >= self.critic_warmup_steps:
-                self.optimizer = self.build_optimizer(model=self.model)
-                self.critic_warmup_steps = 0
+                self._rebuild_optimizer_after_critic_warmup()
         else:
             lr_list = [group["lr"] for group in self.optimizer.param_groups]
 
         return grad_norm, lr_list
+
+    def _rebuild_optimizer_after_critic_warmup(self) -> None:
+        prev_last_epoch = self.lr_scheduler.last_epoch
+        prev_step_count = getattr(self.lr_scheduler, "_step_count", None)
+        self.optimizer = self.build_optimizer(model=self.model)
+        self.lr_scheduler = self.build_lr_scheduler(
+            optimizer=self.optimizer, optim_config=self._cfg.optim
+        )
+        self.lr_scheduler.last_epoch = prev_last_epoch
+        if prev_step_count is not None:
+            self.lr_scheduler._step_count = prev_step_count
+        self.critic_warmup_steps = 0
 
     def build_lr_scheduler(
         self, optimizer: Optimizer, optim_config: DictConfig

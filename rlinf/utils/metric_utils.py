@@ -186,6 +186,45 @@ def compute_loss_mask(dones):
     return loss_mask, loss_mask_sum
 
 
+def compute_abort_loss_mask(dones, abort_flags):
+    """Mask all transitions in episodes ended by an operator abort."""
+    if dones.shape != abort_flags.shape:
+        raise ValueError(
+            "dones and abort_flags must have the same shape, got "
+            f"{dones.shape} and {abort_flags.shape}."
+        )
+    if dones.ndim != 3 or dones.shape[0] < 2:
+        raise ValueError("dones and abort_flags must have shape [T + 1, B, C].")
+
+    _, batch_size, chunk_size = dones.shape
+    num_chunk_steps = dones.shape[0] - 1
+    num_steps = num_chunk_steps * chunk_size
+    flattened_dones = dones.to(torch.bool).transpose(1, 2).reshape(-1, batch_size)
+    flattened_aborts = (
+        abort_flags.to(torch.bool).transpose(1, 2).reshape(-1, batch_size)
+    )
+    flattened_dones = flattened_dones[-(num_steps + 1) :]
+    flattened_aborts = flattened_aborts[-(num_steps + 1) :]
+
+    flattened_mask = torch.ones(
+        (num_steps, batch_size), dtype=torch.bool, device=dones.device
+    )
+    for batch_id in range(batch_size):
+        episode_start = 0
+        for step_id in range(num_steps):
+            outcome_id = step_id + 1
+            if flattened_dones[outcome_id, batch_id]:
+                if flattened_aborts[outcome_id, batch_id]:
+                    flattened_mask[episode_start : step_id + 1, batch_id] = False
+                episode_start = step_id + 1
+
+    loss_mask = flattened_mask.reshape(
+        num_chunk_steps, chunk_size, batch_size
+    ).transpose(1, 2)
+    loss_mask_sum = loss_mask.sum(dim=(0, 2), keepdim=True).expand_as(loss_mask)
+    return loss_mask, loss_mask_sum
+
+
 def print_metrics_table(
     step: int, total_steps: int, start_time: float, metrics: dict, start_step: int = 0
 ):

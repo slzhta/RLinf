@@ -1,15 +1,29 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # TODO(liangzhi): There may have somethin to change
-import sapien
-import numpy as np
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
+import numpy as np
+import sapien
 from mani_skill.agents.controllers import deepcopy_dict
 from mani_skill.agents.registration import register_agent
 from mani_skill.agents.robots.panda.panda import Panda
 from mani_skill.sensors.camera import CameraConfig
 
+from rlinf.envs.maniskill.tasks.digital_twin import DIGITAL_TWIN_ASSET_DIR
 from rlinf.envs.maniskill.tasks.digital_twin.controller import (
     SafePDEEPoseControllerConfig,
     SafePDJointPosMimicControllerConfig,
@@ -43,9 +57,7 @@ class PandaUMI(Panda):
     """Panda arm robot with the real sense camera attached to gripper"""
 
     uid = "panda_umi"
-    urdf_path = str(
-        Path(__file__).resolve().parents[1] / "assets" / "robots" / "panda_umi.urdf"
-    )
+    urdf_path = str(DIGITAL_TWIN_ASSET_DIR / "robots" / "panda_umi.urdf")
 
     # Franka-aligned action semantics: action is clipped to [-1, 1], then scaled.
     action_scale = [0.1, 0.1, 1.0]  # [xyz_scale, rpy_scale, gripper_scale]
@@ -62,17 +74,21 @@ class PandaUMI(Panda):
         self,
         *args,
         controller_alignment: dict[str, Any] | None = None,
+        enable_hand_camera: bool = True,
         **kwargs,
     ):
         self._controller_alignment_cfg = _normalize_controller_alignment_config(
             controller_alignment
         )
+        self.enable_hand_camera = enable_hand_camera
         super().__init__(*args, **kwargs)
 
     @property
     def _sensor_configs(self):
         from rlinf.envs.maniskill.tasks.digital_twin import PANDA_UMI_CAMERA_SETTINGS
 
+        if not self.enable_hand_camera:
+            return []
         camera_name = "hand_camera"
         camera_settings = PANDA_UMI_CAMERA_SETTINGS[camera_name]
         return [

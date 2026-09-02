@@ -1,11 +1,23 @@
-import os
-from typing import Any, Optional, Union, Sequence
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any, Sequence, Union
 
 import cv2
 import numpy as np
 import sapien
 import torch
-
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import Camera, CameraConfig
 from mani_skill.utils import common
@@ -20,7 +32,6 @@ from rlinf.envs.maniskill.tasks.digital_twin import (
 from rlinf.envs.maniskill.tasks.digital_twin.robots import PandaUMI
 from rlinf.envs.maniskill.tasks.digital_twin.scene import TableSceneBuilder
 
-
 ForegroundActor = Actor | Articulation | Link
 
 
@@ -29,6 +40,8 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     SUPPORTED_ROBOTS = ["panda_umi"]
     CAMERA_NAMES = ("3rdview_camera", "hand_camera")
+    GPU_RESET_IK_MAX_POS_STEP = 0.02
+    GPU_RESET_IK_MAX_ROT_STEP = np.pi / 18
     DR_BOOL_KEYS = (
         "randomize_lighting",
         "randomize_joint_control",
@@ -55,6 +68,8 @@ class DigitalTwinBaseEnv(BaseEnv):
         robot_uids="panda_umi",
         robot_init_qpos_noise=0.02,
         overwrite_rgb_in_obs: bool = True,
+        use_hand_camera: bool = True,
+        synchronize_render: bool = True,
         controller_alignment: dict[str, Any] | None = None,
         reset_alignment: dict[str, Any] | None = None,
         task_alignment: dict[str, Any] | None = None,
@@ -80,6 +95,8 @@ class DigitalTwinBaseEnv(BaseEnv):
 
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.overwrite_rgb_in_obs = overwrite_rgb_in_obs
+        self.use_hand_camera = use_hand_camera
+        self.synchronize_render = synchronize_render
         self.controller_alignment = self._normalize_controller_alignment_arg(
             controller_alignment
         )
@@ -367,6 +384,7 @@ class DigitalTwinBaseEnv(BaseEnv):
             self._control_mode,
             initial_pose=sapien.Pose(p=[-0.615, 0, 0]),
             controller_alignment=self.controller_alignment,
+            enable_hand_camera=self.use_hand_camera,
         )
 
     def _load_scene(self, options: dict):
@@ -402,6 +420,158 @@ class DigitalTwinBaseEnv(BaseEnv):
                 "controller_alignment must be a mapping of controller settings"
             )
         return dict(controller_alignment)
+
+    def _solve_arm_ik_qpos(
+        self,
+        target_pose: Pose,
+        seed_qpos: torch.Tensor,
+        env_idx: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        arm_controller = self._get_arm_controller()
+        if arm_controller is None:
+            raise RuntimeError("Cannot find arm controller for IK during reset.")
+        kinematics = getattr(arm_controller, "kinematics", None)
+        if kinematics is None or not hasattr(kinematics, "compute_ik"):
+            raise RuntimeError("Arm controller has no kinematics.compute_ik API.")
+
+        current_pose = self.agent.ee_pose_at_robot_base[env_idx]
+        if device.type == "cuda":
+            return self._solve_arm_ik_qpos_gpu_incremental(
+                kinematics=kinematics,
+                arm_controller=arm_controller,
+                current_pose=current_pose,
+                target_pose=target_pose,
+                seed_qpos=seed_qpos,
+                device=device,
+                dtype=dtype,
+            )
+
+        ik_qpos = kinematics.compute_ik(
+            pose=target_pose,
+            q0=seed_qpos,
+            is_delta_pose=False,
+            current_pose=current_pose,
+            solver_config=arm_controller.config.delta_solver_config,
+        )
+        return self._normalize_ik_qpos(
+            ik_qpos=ik_qpos,
+            seed_qpos=seed_qpos,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _solve_arm_ik_qpos_gpu_incremental(
+        self,
+        kinematics,
+        arm_controller,
+        current_pose: Pose,
+        target_pose: Pose,
+        seed_qpos: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        qpos = seed_qpos.clone()
+        start_pose = current_pose
+        previous_waypoint = current_pose
+        num_steps = self._estimate_gpu_reset_ik_steps(current_pose, target_pose)
+
+        for step_idx in range(1, num_steps + 1):
+            waypoint = self._interpolate_pose(
+                start_pose, target_pose, step_idx / num_steps
+            )
+            ik_qpos = kinematics.compute_ik(
+                pose=waypoint,
+                q0=qpos,
+                is_delta_pose=False,
+                current_pose=previous_waypoint,
+                solver_config=arm_controller.config.delta_solver_config,
+            )
+            qpos[:, :7] = self._normalize_ik_qpos(
+                ik_qpos=ik_qpos,
+                seed_qpos=qpos,
+                device=device,
+                dtype=dtype,
+            )
+            previous_waypoint = waypoint
+
+        return qpos[:, :7]
+
+    @staticmethod
+    def _normalize_ik_qpos(
+        ik_qpos,
+        seed_qpos: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if ik_qpos is None:
+            return seed_qpos[:, :7]
+
+        ik_qpos = torch.as_tensor(ik_qpos, device=device, dtype=dtype)
+        if ik_qpos.ndim == 1:
+            ik_qpos = ik_qpos.unsqueeze(0)
+        if ik_qpos.shape[0] == 1 and seed_qpos.shape[0] > 1:
+            ik_qpos = ik_qpos.repeat(seed_qpos.shape[0], 1)
+        if ik_qpos.shape[1] < 7:
+            raise RuntimeError(
+                f"IK result has invalid shape {tuple(ik_qpos.shape)}, "
+                "expected at least 7 joints."
+            )
+        return ik_qpos[:, :7]
+
+    def _estimate_gpu_reset_ik_steps(
+        self, current_pose: Pose, target_pose: Pose
+    ) -> int:
+        position_delta = torch.linalg.norm(target_pose.p - current_pose.p, dim=1)
+        quaternion_dot = (
+            torch.sum(current_pose.q * target_pose.q, dim=1).abs().clamp(max=1.0)
+        )
+        rotation_delta = 2.0 * torch.arccos(quaternion_dot)
+        position_steps = torch.ceil(
+            position_delta / self.GPU_RESET_IK_MAX_POS_STEP
+        )
+        rotation_steps = torch.ceil(
+            rotation_delta / self.GPU_RESET_IK_MAX_ROT_STEP
+        )
+        return max(1, int(torch.maximum(position_steps, rotation_steps).max().item()))
+
+    def _interpolate_pose(
+        self, start_pose: Pose, target_pose: Pose, alpha: float
+    ) -> Pose:
+        position = torch.lerp(start_pose.p, target_pose.p, alpha)
+        quaternion = self._slerp_quaternion(start_pose.q, target_pose.q, alpha)
+        return Pose.create_from_pq(p=position, q=quaternion)
+
+    @staticmethod
+    def _slerp_quaternion(
+        start_q: torch.Tensor, target_q: torch.Tensor, alpha: float
+    ) -> torch.Tensor:
+        dot = torch.sum(start_q * target_q, dim=1, keepdim=True)
+        target_q = torch.where(dot < 0.0, -target_q, target_q)
+        dot = torch.sum(start_q * target_q, dim=1, keepdim=True).clamp(-1.0, 1.0)
+        alpha_t = torch.full_like(dot, float(alpha))
+        linear_mask = dot.abs() > 0.9995
+
+        theta_0 = torch.arccos(dot)
+        sin_theta_0 = torch.sin(theta_0).clamp(min=1e-6)
+        theta = theta_0 * alpha_t
+        slerped = (
+            torch.sin(theta_0 - theta) / sin_theta_0 * start_q
+            + torch.sin(theta) / sin_theta_0 * target_q
+        )
+        linearly_interpolated = (1.0 - alpha_t) * start_q + alpha_t * target_q
+        quaternion = torch.where(linear_mask, linearly_interpolated, slerped)
+        return quaternion / torch.linalg.norm(
+            quaternion, dim=1, keepdim=True
+        ).clamp(min=1e-6)
+
+    def _get_arm_controller(self):
+        controller = getattr(self.agent, "controller", None)
+        controllers = getattr(controller, "controllers", None)
+        if isinstance(controllers, dict):
+            return controllers.get("arm")
+        return None
 
     def _normalize_reset_alignment_arg(
         self,
@@ -499,7 +669,7 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     def _ensure_randomization_info(self):
         if len(self._parallel_randomization_info) != self.num_envs:
-            self._parallel_randomization_info = [dict() for _ in range(self.num_envs)]
+            self._parallel_randomization_info = [{} for _ in range(self.num_envs)]
 
     def _set_randomization_value(self, scene_idx: int, key: str, value: Any):
         self._ensure_randomization_info()
@@ -686,7 +856,7 @@ class DigitalTwinBaseEnv(BaseEnv):
         if camera_name not in self._sensors:
             raise KeyError(f"Unknown camera: {camera_name}")
         return Pose.create(self._sensors[camera_name].camera.get_local_pose(), device=self.device).sp
-    
+
     # overwrite for get segmentation for env.get_obs()
     def _get_obs_sensor_data(self, apply_texture_transforms: bool = True) -> dict:
         # This overrides ManiSkill's default camera capture path so fused observations
@@ -730,7 +900,7 @@ class DigitalTwinBaseEnv(BaseEnv):
                 apply_texture_transforms=apply_texture_transforms,
             )
 
-        if self.backend.render_device.is_cuda():
+        if self.synchronize_render and self.backend.render_device.is_cuda():
             torch.cuda.synchronize()
         return sensor_obs
 
@@ -813,11 +983,11 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     def _get_obs_extra(self, info: dict):
         return {}
-    
+
     def step(self, action: Union[None, np.ndarray, torch.Tensor, dict]):
         if isinstance(action, np.ndarray):
             action = torch.from_numpy(action).to(self.device)
         else:
             action = action.to(self.device)
-        
+
         return super().step(action)
