@@ -10,16 +10,6 @@ if [[ $# -gt 0 ]]; then
     shift
 fi
 
-required_env=(
-    RAY_ADDRESS
-)
-for env_name in "${required_env[@]}"; do
-    if [[ -z "${!env_name:-}" ]]; then
-        echo "Missing required environment variable: ${env_name}" >&2
-        exit 2
-    fi
-done
-
 CONFIG_FILE="${SCRIPT_DIR}/config/${CONFIG_NAME}.yaml"
 if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "Missing required file: ${CONFIG_FILE}" >&2
