@@ -1107,6 +1107,14 @@ class PickAndPlaceDigitalTwinEnv(DigitalTwinBaseEnv):
                 f"Got action dim {action_dim}."
             )
 
+    def reset(self, seed=None, options=None):
+        raw_obs, infos = super().reset(seed=seed, options=options)
+        if isinstance(raw_obs, dict) and (
+            "sensor_data" in raw_obs or "image" in raw_obs
+        ):
+            infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, infos
+
     def step(self, action):
         self._validate_pick_action(action)
         raw_obs, reward, terminations, truncations, infos = DigitalTwinBaseEnv.step(
