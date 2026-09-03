@@ -4,9 +4,7 @@ from typing import Any
 import numpy as np
 import sapien
 import torch
-import torch.nn.functional as F
 from sapien.physx import PhysxMaterial
-from transforms3d.euler import mat2euler
 
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.geometry.rotation_conversions import (
@@ -28,7 +26,6 @@ class PushButtonEnv(DigitalTwinBaseEnv):
     BUTTON_FORCE_THRESHOLD = 0.05
     CLOSED_GRIPPER_QPOS = 0.0
     CLOSED_GRIPPER_ACTION = -1.0
-    OUTPUT_IMAGE_SIZE = 128
     TASK_DESCRIPTION = "reach the button target and press it"
     SUCCESS_TARGET_Z_OFFSET = 0.025
     SUCCESS_POSITION_THRESHOLD = 0.015
@@ -488,79 +485,6 @@ class PushButtonEnv(DigitalTwinBaseEnv):
 
         builder.initial_pose = self.BUTTON_POSE
         return builder.build_kinematic(name="button")
-
-    def _build_extracted_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
-        sensor_data = raw_obs.get("sensor_data", {})
-        image_data = raw_obs.get("image", {})
-        main_camera_obs = image_data.get("3rdview_camera", sensor_data["3rdview_camera"])
-        main_images = self._pad_and_resize_images(
-            main_camera_obs["rgb"].to(torch.uint8)
-        )
-
-        extracted_obs = {
-            "main_images": main_images,
-            "task_descriptions": self.get_language_instruction(),
-        }
-
-        if "hand_camera" in sensor_data:
-            hand_camera_obs = image_data.get("hand_camera", sensor_data["hand_camera"])
-            extracted_obs["extra_view_images"] = (
-                self._pad_and_resize_images(
-                    hand_camera_obs["rgb"].to(torch.uint8)
-                ).unsqueeze(1)
-            )
-
-        joint_pos = self.agent.robot.get_qpos().to(torch.float32)[:, :7]
-        ee_pose_t = (
-            self.agent.ee_pose_at_robot_base.to_transformation_matrix().cpu().numpy()
-        )
-        pos = torch.from_numpy(ee_pose_t[:, :3, 3]).to(
-            joint_pos.device, dtype=torch.float32
-        )
-        euler = torch.from_numpy(
-            np.stack(
-                [mat2euler(ee_pose_t[i, :3, :3], "sxyz") for i in range(self.num_envs)],
-                axis=0,
-            )
-        ).to(joint_pos.device, dtype=torch.float32)
-        extracted_obs["states"] = torch.cat([joint_pos, pos, euler], dim=1)
-        return extracted_obs
-
-    def get_language_instruction(self) -> list[str]:
-        return [self.TASK_DESCRIPTION] * self.num_envs
-
-    def _pad_and_resize_images(self, images: torch.Tensor) -> torch.Tensor:
-        if images.dim() != 4:
-            raise ValueError(f"Expected image tensor with shape [B, H, W, C], got {images.shape}.")
-
-        _, height, width, _ = images.shape
-        if height < width:
-            pad = width - height
-            pad_top = pad // 2
-            pad_bottom = pad - pad_top
-            pad_left = 0
-            pad_right = 0
-        else:
-            pad = height - width
-            pad_left = pad // 2
-            pad_right = pad - pad_left
-            pad_top = 0
-            pad_bottom = 0
-
-        nchw_images = images.permute(0, 3, 1, 2).to(torch.float32)
-        padded_images = F.pad(
-            nchw_images,
-            (pad_left, pad_right, pad_top, pad_bottom),
-            mode="constant",
-            value=0.0,
-        )
-        resized_images = F.interpolate(
-            padded_images,
-            size=(self.OUTPUT_IMAGE_SIZE, self.OUTPUT_IMAGE_SIZE),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return resized_images.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1)
 
     def reset(self, seed=None, options=None):
         raw_obs, infos = super().reset(seed=seed, options=options)
