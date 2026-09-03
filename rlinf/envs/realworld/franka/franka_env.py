@@ -155,7 +155,6 @@ class FrankaEnv(gym.Env):
 
         self._target_pose = None  # Target pose for target-controller mode
         self._last_gripper_command_time = float("-inf")
-        self._last_gripper_log_time = float("-inf")
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -654,17 +653,6 @@ class FrankaEnv(gym.Env):
                 now - self._last_gripper_command_time
                 >= self.config.gripper_min_command_interval
             )
-            if now - self._last_gripper_log_time >= 1.0:
-                self._logger.info(
-                    "Gripper input: value=%.4f software_open=%s "
-                    "measured_width=%.6f command_allowed=%s",
-                    position,
-                    self._franka_state.gripper_open,
-                    self._franka_state.gripper_position,
-                    command_allowed,
-                )
-                self._last_gripper_log_time = now
-
             if self.config.use_zero_one_gripper_action:
                 # If command is already in [0, 1], keep it. Otherwise treat it as
                 # legacy [-1, 1] and map to [0, 1] for incremental migration.

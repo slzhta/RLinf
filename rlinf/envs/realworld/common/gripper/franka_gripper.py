@@ -20,8 +20,6 @@ were previously embedded in :class:`FrankaController`.
 
 import numpy as np
 
-from rlinf.utils.logging import get_logger
-
 from .base_gripper import BaseGripper
 
 
@@ -53,13 +51,12 @@ class FrankaGripper(BaseGripper):
         from franka_gripper.msg import GraspActionGoal, MoveActionGoal
         from sensor_msgs.msg import JointState
 
-        self._logger = get_logger()
         self._ros = ros
         self._GraspActionGoal = GraspActionGoal
         self._MoveActionGoal = MoveActionGoal
 
         self._position_value: float = 0.0
-        self._is_open_flag: bool = False
+        self._is_open_flag: bool = True
         self._is_ready_flag: bool = False
         self._open_width = float(open_width)
         self._open_speed = float(open_speed)
@@ -86,12 +83,8 @@ class FrankaGripper(BaseGripper):
         msg = self._MoveActionGoal()
         msg.goal.width = self._open_width
         msg.goal.speed = self._open_speed if speed is None else speed
-        self._logger.info(
-            "Publishing Franka gripper open command: width=%.4f speed=%.4f",
-            msg.goal.width,
-            msg.goal.speed,
-        )
         self._ros.put_channel(self._move_channel, msg)
+        self._is_open_flag = True
 
     def close(
         self, speed: float | None = None, force: float | None = None
@@ -102,16 +95,8 @@ class FrankaGripper(BaseGripper):
         msg.goal.epsilon.inner = self._epsilon_inner
         msg.goal.epsilon.outer = self._epsilon_outer
         msg.goal.force = self._close_force if force is None else force
-        self._logger.info(
-            "Publishing Franka gripper close command: width=%.4f speed=%.4f "
-            "force=%.2f epsilon=(%.4f, %.4f)",
-            msg.goal.width,
-            msg.goal.speed,
-            msg.goal.force,
-            msg.goal.epsilon.inner,
-            msg.goal.epsilon.outer,
-        )
         self._ros.put_channel(self._grasp_channel, msg)
+        self._is_open_flag = False
 
     def move(self, position: float, speed: float = 0.3) -> None:
         msg = self._MoveActionGoal()
@@ -134,15 +119,4 @@ class FrankaGripper(BaseGripper):
 
     def _on_state_msg(self, msg) -> None:
         self._position_value = np.sum(msg.position)
-        open_threshold = 0.5 * (self._open_width + self._close_width)
-        is_open = self._position_value >= open_threshold
-        if not self._is_ready_flag or is_open != self._is_open_flag:
-            self._logger.info(
-                "Franka gripper state updated from joint feedback: "
-                "width=%.6f open=%s threshold=%.6f",
-                self._position_value,
-                is_open,
-                open_threshold,
-            )
-        self._is_open_flag = bool(is_open)
         self._is_ready_flag = True
