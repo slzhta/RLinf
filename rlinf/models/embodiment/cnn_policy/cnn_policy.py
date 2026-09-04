@@ -19,6 +19,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.bernoulli import Bernoulli
 from torch.distributions.normal import Normal
 
@@ -56,6 +57,7 @@ def _select_policy_extra_view_images(
 @dataclass
 class CNNConfig:
     image_size: list[int] = field(default_factory=list)
+    encoder_input_size: int = 128
     image_num: int = 1
     action_dim: int = 4
     state_dim: int = 29
@@ -128,6 +130,8 @@ class CNNPolicy(nn.Module, BasePolicy):
         )
         if self.cfg.binary_action_temperature <= 0:
             raise ValueError("binary_action_temperature must be positive.")
+        if self.cfg.encoder_input_size <= 0:
+            raise ValueError("encoder_input_size must be positive.")
         if self.cfg.logstd_range is not None and (
             len(self.cfg.logstd_range) != 2
             or self.cfg.logstd_range[0] > self.cfg.logstd_range[1]
@@ -155,7 +159,12 @@ class CNNPolicy(nn.Module, BasePolicy):
         self.cuda_graph_manager = None
         encoder_out_dim = 0
         if self.cfg.backbone == "resnet":
-            sample_x = torch.randn(1, *self.cfg.image_size)
+            sample_x = torch.randn(
+                1,
+                self.in_channels,
+                self.cfg.encoder_input_size,
+                self.cfg.encoder_input_size,
+            )
             for img_id in range(self.cfg.image_num):
                 self.encoders.append(
                     ResNetEncoder(
@@ -313,6 +322,14 @@ class CNNPolicy(nn.Module, BasePolicy):
             if images.shape[3] == 3:
                 # [B, H, W, C] -> [B, C, H, W]
                 images = images.permute(0, 3, 1, 2)
+            encoder_size = (self.cfg.encoder_input_size,) * 2
+            if images.shape[-2:] != encoder_size:
+                images = F.interpolate(
+                    images,
+                    size=encoder_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
             visual_features.append(self.encoders[img_id](images))
         visual_feature = torch.cat(visual_features, dim=-1)
         full_feature = visual_feature

@@ -4,6 +4,7 @@ model_path: ""
 
 policy_setup: "panda-ee-dpos"
 image_size: [3, 128, 128]
+encoder_input_size: 128
 state_dim: 29
 use_state: True
 action_dim: 4

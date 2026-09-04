@@ -50,6 +50,7 @@ class FrankaRobotConfig:
     gripper_connection: Optional[str] = None
     gripper_config: dict[str, float] = field(default_factory=dict)
     enable_camera_player: bool = True
+    output_image_size: int = 224
 
     is_dummy: bool = False
     use_dense_reward: bool = False
@@ -106,6 +107,8 @@ class FrankaRobotConfig:
 
     def __post_init__(self):
         """Convert list fields from YAML/Hydra to numpy arrays."""
+        if self.output_image_size <= 0:
+            raise ValueError("output_image_size must be positive.")
         self.target_ee_pose = np.array(self.target_ee_pose)
         self.reset_ee_pose = np.array(self.reset_ee_pose)
         self.reward_threshold = np.array(self.reward_threshold)
@@ -551,7 +554,14 @@ class FrankaEnv(gym.Env):
                 "frames": gym.spaces.Dict(
                     {
                         f"wrist_{k + 1}": gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
+                            0,
+                            255,
+                            shape=(
+                                self.config.output_image_size,
+                                self.config.output_image_size,
+                                3,
+                            ),
+                            dtype=np.uint8,
                         )
                         for k in range(len(self.config.camera_serials))
                     }

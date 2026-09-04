@@ -42,7 +42,7 @@ class DigitalTwinBaseEnv(BaseEnv):
 
     SUPPORTED_ROBOTS = ["panda_umi"]
     CAMERA_NAMES = ("3rdview_camera", "hand_camera")
-    OUTPUT_IMAGE_SIZE = 128
+    OUTPUT_IMAGE_SIZE = 224
     GPU_RESET_IK_MAX_POS_STEP = 0.02
     GPU_RESET_IK_MAX_ROT_STEP = np.pi / 18
     DR_BOOL_KEYS = (
