@@ -118,7 +118,7 @@ env:
       clip_rz_range: 0.5
       clip_rp_range: 0.01
       use_target_controller: true
-      enable_safety_box: false
+      enable_safety_box: true
   train:
     total_num_envs: 16
     num_workers: 1
