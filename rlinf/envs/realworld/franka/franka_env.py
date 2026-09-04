@@ -80,12 +80,14 @@ class FrankaRobotConfig:
     enable_random_reset: bool = False
 
     random_xy_range: float = 0.0
+    random_z_range: float = 0.0
     random_rz_range: float = 0.0  # np.pi / 6
 
     # Robot parameters
     # Same as the position arrays: first 3 are position limits, last 3 are orientation limits
     ee_pose_limit_min: np.ndarray = field(default_factory=lambda: np.zeros(6))
     ee_pose_limit_max: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    enable_safety_box: bool = True
     compliance_param: dict[str, float] = field(default_factory=dict)
     precision_param: dict[str, float] = field(default_factory=dict)
     binary_gripper_threshold: float = 0.5
@@ -494,6 +496,9 @@ class FrankaEnv(gym.Env):
             reset_pose[:2] += np.random.uniform(
                 -self.config.random_xy_range, self.config.random_xy_range, (2,)
             )
+            reset_pose[2] += np.random.uniform(
+                -self.config.random_z_range, self.config.random_z_range
+            )
             euler_random = self.config.target_ee_pose[3:].copy()
             euler_random[-1] += np.random.uniform(
                 -self.config.random_rz_range, self.config.random_rz_range
@@ -629,6 +634,9 @@ class FrankaEnv(gym.Env):
 
     def _clip_position_to_safety_box(self, position: np.ndarray) -> np.ndarray:
         """Clip the position array to be within the safety box."""
+        if not self.config.enable_safety_box:
+            return position
+
         position[:3] = np.clip(
             position[:3], self._xyz_safe_space.low, self._xyz_safe_space.high
         )

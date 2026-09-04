@@ -342,6 +342,11 @@ class EnvWorker(Worker):
     ) -> dict[str, Any]:
         translated_cfg = copy.deepcopy(controller_cfg)
 
+        if not bool(translated_cfg.get("enable_safety_box", True)):
+            translated_cfg.pop("ee_pose_limit_min", None)
+            translated_cfg.pop("ee_pose_limit_max", None)
+            return translated_cfg
+
         target_ee_pose = translated_cfg.get("target_ee_pose", None)
         clip_x_range = translated_cfg.get("clip_x_range", None)
         clip_y_range = translated_cfg.get("clip_y_range", None)

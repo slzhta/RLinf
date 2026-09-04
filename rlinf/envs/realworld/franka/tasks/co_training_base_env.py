@@ -25,6 +25,7 @@ class FrankaCoTrainingBaseConfig(FrankaRobotConfig):
     clip_rz_range: float = np.pi / 5  # for bounding box
     clip_rp_range: float = np.pi / 6
     enable_random_reset: bool = True
+    enable_inner_safety_box: bool = True
 
     target_ee_pose: np.ndarray = field(default_factory=lambda: np.zeros(6))
     reward_threshold: np.ndarray = field(
@@ -153,7 +154,10 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
     def _clip_position_to_safety_box(self, pose):
         pose = super()._clip_position_to_safety_box(pose)
         # Clip xyz to inner box
-        if self.inner_safety_box.contains(pose[:3]):
+        if (
+            self.config.enable_inner_safety_box
+            and self.inner_safety_box.contains(pose[:3])
+        ):
             pose[:3] = self.intersect_line_bbox(
                 self._franka_state.tcp_pose[:3],
                 pose[:3],

@@ -10,7 +10,7 @@ max_episode_steps: 120
 use_spacemouse: false
 use_gello: false
 no_gripper: false
-use_relative_frame: true
+use_relative_frame: false
 keyboard_reward_wrapper: pnp_human
 main_image_key: wrist_2
 include_states_in_obs: false

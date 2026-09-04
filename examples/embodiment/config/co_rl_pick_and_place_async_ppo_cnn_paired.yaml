@@ -108,8 +108,17 @@ env:
   group_name: EnvGroup
   sim_real_alignment:
     controller:
+      target_ee_pose: [0.54515648, 0.03448609, -0.01847301, 3.07488508, -0.01941186, -0.0446862]
+      reset_ee_pose: [0.54515648, 0.03448609, 0.06902699, 3.07488508, -0.01941186, -0.0446862]
       action_scale: [0.01, 0.05, 1.0]
+      clip_x_range: 0.15
+      clip_y_range: 0.15
+      clip_z_range_high: 0.15
+      clip_z_range_low: 0.025
+      clip_rz_range: 0.5
+      clip_rp_range: 0.01
       use_target_controller: true
+      enable_safety_box: false
   train:
     total_num_envs: 16
     num_workers: 1
@@ -118,7 +127,6 @@ env:
       num_workers: 1
       override_cfg:
         camera_serials: ["141722075170", "233622071355"]
-        target_ee_pose: [0.55865414, 0.16184118, 0.02504874, 3.00194796, 0.0286977, -0.05498182]
   eval:
     total_num_envs: 8
     num_workers: 1
@@ -129,7 +137,6 @@ env:
       num_workers: 1
       override_cfg:
         camera_serials: ["141722075170", "233622071355"]
-        target_ee_pose: [0.55865414, 0.16184118, 0.02504874, 3.00194796, 0.0286977, -0.05498182]
 
 rollout:
   group_name: RolloutGroup
