@@ -39,11 +39,11 @@ class FrankaPickAndPlaceConfig(FrankaCoTrainingBaseConfig):
         default_factory=lambda: {
             "open_width": 0.08,
             "open_speed": 0.3,
-            "close_width": 0.035,
+            "close_width": 0.025,
             "close_speed": 0.3,
             "close_force": 130.0,
-            "epsilon_inner": 0.005,
-            "epsilon_outer": 0.005,
+            "epsilon_inner": 0.015,
+            "epsilon_outer": 0.015,
         }
     )
     enable_downward_contact_failure: bool = False
