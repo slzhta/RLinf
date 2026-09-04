@@ -37,13 +37,13 @@ class FrankaPickAndPlaceConfig(FrankaCoTrainingBaseConfig):
     gripper_min_command_interval: float = 0.0
     gripper_config: dict[str, float] = field(
         default_factory=lambda: {
-            "open_width": 0.08,
+            "open_width": 0.09,
             "open_speed": 0.3,
-            "close_width": 0.025,
+            "close_width": 0.01,
             "close_speed": 0.3,
             "close_force": 130.0,
-            "epsilon_inner": 0.015,
-            "epsilon_outer": 0.015,
+            "epsilon_inner": 1.0,
+            "epsilon_outer": 1.0,
         }
     )
     enable_downward_contact_failure: bool = False
