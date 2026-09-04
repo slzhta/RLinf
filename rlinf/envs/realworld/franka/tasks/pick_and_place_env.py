@@ -32,18 +32,18 @@ class FrankaPickAndPlaceConfig(FrankaCoTrainingBaseConfig):
     random_xy_range: float = 0.015
     random_z_range: float = 0.01
     random_rz_range: float = 0.35
-    step_frequency: float = 5.0
+    step_frequency: float = 10.0
     max_num_steps: int = 120
-    gripper_min_command_interval: float = 1.0
+    gripper_min_command_interval: float = 0.0
     gripper_config: dict[str, float] = field(
         default_factory=lambda: {
             "open_width": 0.08,
-            "open_speed": 0.04,
-            "close_width": 0.045,
-            "close_speed": 0.03,
-            "close_force": 15.0,
+            "open_speed": 0.3,
+            "close_width": 0.01,
+            "close_speed": 0.3,
+            "close_force": 130.0,
             "epsilon_inner": 0.005,
-            "epsilon_outer": 0.01,
+            "epsilon_outer": 0.06,
         }
     )
     enable_downward_contact_failure: bool = False
