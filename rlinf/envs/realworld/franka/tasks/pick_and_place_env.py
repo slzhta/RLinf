@@ -137,18 +137,6 @@ class FrankaPickAndPlaceEnv(FrankaCoTrainingBaseEnv):
         }
         return observation
 
-    def _crop_frame(self, name: str, image: np.ndarray) -> np.ndarray:
-        """Apply the centered square crop used during PnP collection."""
-        del name
-        height, width = image.shape[:2]
-        crop_size = min(height, width)
-        start_y = (height - crop_size) // 2
-        start_x = (width - crop_size) // 2
-        return image[
-            start_y : start_y + crop_size,
-            start_x : start_x + crop_size,
-        ]
-
     def _calc_step_reward(
         self, observation, is_gripper_action_effective=False
     ) -> float:
