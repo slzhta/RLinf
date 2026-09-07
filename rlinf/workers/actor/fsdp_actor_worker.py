@@ -1031,6 +1031,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._co_training_buffer_metrics: dict[str, float] = {}
             self._real_env_interaction_steps = 0
             self._sim_env_interaction_steps = 0
+            self._domain_buffer_dropped_rollouts = {"real": 0, "sim": 0}
             (
                 self._train_batch_steps,
                 self._min_train_real_steps,
@@ -1074,6 +1075,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "max_sim_buffer_steps must be >= one sim worker rollout in "
                 "trajectory units."
             )
+            self._configure_domain_buffer_mode(buffer_cfg)
             self._next_real_env_rank_idx = 0
             self._next_sim_env_rank_idx = 0
         if self.enable_sft_co_train:
@@ -1297,14 +1299,58 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """Allow one full domain worker rollout beyond a buffer sample."""
         return int(self._train_batch_steps + receive_steps)
 
+    def _configure_domain_buffer_mode(self, buffer_cfg: DictConfig | dict) -> None:
+        self._domain_buffer_mode = buffer_cfg.get("mode", "fifo")
+        if self._domain_buffer_mode not in ("fifo", "latest"):
+            raise ValueError("co_training_domain_buffer.mode must be fifo or latest.")
+        if self._domain_buffer_mode == "latest":
+            for domain in ("real", "sim"):
+                capacity = getattr(self, f"_max_{domain}_buffer_steps")
+                max_sample = getattr(self, f"_max_train_{domain}_steps")
+                if capacity < max_sample:
+                    raise ValueError(
+                        f"max_{domain}_buffer_steps must be >= {max_sample} "
+                        "to support the full ratio window in latest mode."
+                    )
+
+    def _append_domain_buffer_blocks(
+        self, domain: str, batches: list[dict[str, torch.Tensor]]
+    ) -> int:
+        buffer = getattr(self, f"_{domain}_batch_buffer")
+        buffer.extend(batches)
+        if self._domain_buffer_mode == "fifo":
+            return 0
+        capacity = getattr(self, f"_max_{domain}_buffer_steps")
+        dropped = max(0, len(buffer) - capacity)
+        if dropped:
+            del buffer[:dropped]
+        self._domain_buffer_dropped_rollouts[domain] += dropped
+        return dropped
+
     async def _recv_domain_buffered_batch(
         self, input_channel: Channel
     ) -> dict[str, torch.Tensor]:
         """Fill domain buffers, then take a ratio-windowed fixed-size batch."""
         real_steps_before_recv = len(self._real_batch_buffer)
         sim_steps_before_recv = len(self._sim_batch_buffer)
-        received_real_steps = 0
-        received_sim_steps = 0
+        received = {"real": 0, "sim": 0}
+        dropped = {"real": 0, "sim": 0}
+
+        async def receive(src_rank: int, domain: str) -> None:
+            trajectory = await self._recv_keyed_actor_trajectory(
+                input_channel, src_rank
+            )
+            batches = self._process_domain_trajectory(trajectory)
+            received[domain] += len(batches)
+            dropped[domain] += self._append_domain_buffer_blocks(domain, batches)
+            if domain == "real":
+                self._real_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
+            else:
+                self._sim_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
 
         while not self._domain_buffers_ready_for_train():
             receivable = self._next_receivable_domain_rank(input_channel)
@@ -1313,29 +1359,43 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 continue
 
             src_rank, domain = receivable
-            trajectory = await self._recv_keyed_actor_trajectory(input_channel, src_rank)
-            batches = self._process_domain_trajectory(trajectory)
-            if domain == "real":
-                self._real_batch_buffer.extend(batches)
-                received_real_steps += len(batches)
-                self._real_env_interaction_steps += (
-                    len(batches) * self._rollout_steps_per_trajectory
-                )
-            else:
-                self._sim_batch_buffer.extend(batches)
-                received_sim_steps += len(batches)
-                self._sim_env_interaction_steps += (
-                    len(batches) * self._rollout_steps_per_trajectory
-                )
+            await receive(src_rank, domain)
 
+        drain_messages = 0
+        drain_seconds = 0.0
+        if self._domain_buffer_mode == "latest":
+            drain_start = time.perf_counter()
+            # Snapshot once so ongoing production cannot postpone training forever.
+            pending = [
+                (rank, domain, self._keyed_actor_trajectory_qsize(input_channel, rank))
+                for domain, ranks in (
+                    ("real", self._real_env_ranks()),
+                    ("sim", self._sim_env_ranks()),
+                )
+                for rank in ranks
+            ]
+            for rank, domain, count in pending:
+                for _ in range(count):
+                    await receive(rank, domain)
+                    drain_messages += 1
+            drain_seconds = time.perf_counter() - drain_start
+
+        received_real_steps = received["real"]
+        received_sim_steps = received["sim"]
+        real_steps_after_recv = len(self._real_batch_buffer)
+        sim_steps_after_recv = len(self._sim_batch_buffer)
         train_real_steps = self._select_train_real_steps_from_buffers()
         assert train_real_steps is not None
         train_sim_steps = self._train_batch_steps - train_real_steps
         real_batches = self._pop_buffer_blocks(
-            self._real_batch_buffer, train_real_steps
+            self._real_batch_buffer,
+            train_real_steps,
+            latest=self._domain_buffer_mode == "latest",
         )
         sim_batches = self._pop_buffer_blocks(
-            self._sim_batch_buffer, train_sim_steps
+            self._sim_batch_buffer,
+            train_sim_steps,
+            latest=self._domain_buffer_mode == "latest",
         )
         self._co_training_buffer_metrics = {
             "buffer/real_rollouts_before_recv": float(real_steps_before_recv),
@@ -1360,19 +1420,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "buffer/sim_env_interaction_steps": float(
                 self._sim_env_interaction_steps
             ),
-            "buffer/real_rollouts_after_recv": float(
-                real_steps_before_recv + received_real_steps
-            ),
-            "buffer/sim_rollouts_after_recv": float(
-                sim_steps_before_recv + received_sim_steps
-            ),
+            "buffer/real_rollouts_after_recv": float(real_steps_after_recv),
+            "buffer/sim_rollouts_after_recv": float(sim_steps_after_recv),
             "buffer/real_steps_after_recv": float(
-                (real_steps_before_recv + received_real_steps)
-                * self._rollout_steps_per_trajectory
+                real_steps_after_recv * self._rollout_steps_per_trajectory
             ),
             "buffer/sim_steps_after_recv": float(
-                (sim_steps_before_recv + received_sim_steps)
-                * self._rollout_steps_per_trajectory
+                sim_steps_after_recv * self._rollout_steps_per_trajectory
             ),
             "buffer/train_real_rollouts": float(train_real_steps),
             "buffer/train_sim_rollouts": float(train_sim_steps),
@@ -1411,6 +1465,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 self._max_sim_buffer_steps * self._rollout_steps_per_trajectory
             ),
         }
+        if self._domain_buffer_mode == "latest":
+            self._co_training_buffer_metrics.update(
+                {
+                    "buffer/drain_messages": float(drain_messages),
+                    "buffer/drain_seconds": drain_seconds,
+                }
+            )
+            for domain, batches in (("real", real_batches), ("sim", sim_batches)):
+                self._co_training_buffer_metrics.update(
+                    {
+                        f"buffer/dropped_{domain}_rollouts": float(dropped[domain]),
+                        f"buffer/dropped_{domain}_rollouts_total": float(
+                            self._domain_buffer_dropped_rollouts[domain]
+                        ),
+                    }
+                )
+                versions = [
+                    batch["versions"].detach().reshape(-1).float()
+                    for batch in batches
+                    if batch.get("versions") is not None
+                ]
+                if versions:
+                    sampled_versions = torch.cat(versions)
+                    mean_version = sampled_versions.mean().item()
+                    self._co_training_buffer_metrics.update(
+                        {
+                            f"buffer/{domain}_version_mean": mean_version,
+                            f"buffer/{domain}_version_lag_mean": (
+                                self.version - mean_version
+                            ),
+                            f"buffer/{domain}_version_lag_max": (
+                                self.version - sampled_versions.min().item()
+                            ),
+                        }
+                    )
         return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
 
     def _domain_buffers_ready_for_train(self) -> bool:
@@ -1439,6 +1528,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def _next_receivable_domain_rank(
         self, input_channel: Channel
     ) -> tuple[int, str] | None:
+        if self._domain_buffer_mode == "latest":
+            return self._next_queued_domain_rank(input_channel, True, True)
         can_recv_real = (
             len(self._real_batch_buffer) + self._real_receive_steps
             <= self._max_real_buffer_steps
@@ -1584,8 +1675,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
     @staticmethod
     def _pop_buffer_blocks(
-        buffer: list[dict[str, torch.Tensor]], num_blocks: int
+        buffer: list[dict[str, torch.Tensor]], num_blocks: int, latest: bool = False
     ) -> list[dict[str, torch.Tensor]]:
+        if num_blocks < 0 or num_blocks > len(buffer):
+            raise ValueError("Requested block count must be between zero and buffer size.")
+        if num_blocks == 0:
+            return []
+        if latest:
+            blocks = buffer[-num_blocks:]
+            del buffer[-num_blocks:]
+            return blocks
         blocks = buffer[:num_blocks]
         del buffer[:num_blocks]
         return blocks
