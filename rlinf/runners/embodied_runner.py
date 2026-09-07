@@ -72,13 +72,22 @@ class EmbodiedRunner:
         self.reward = reward
         self.weight_sync_interval = self.cfg.runner.weight_sync_interval
         # Data channels
-        self.env_channel = Channel.create("Env")
-        self.rollout_channel = Channel.create("Rollout")
+        use_distributed_channels = bool(
+            self.cfg.algorithm.get("sim_real_rl_co_training", False)
+        )
+        self.env_channel = Channel.create("Env", distributed=use_distributed_channels)
+        self.rollout_channel = Channel.create(
+            "Rollout", distributed=use_distributed_channels
+        )
         actor_channel_maxsize = 0
-        if self.cfg.algorithm.get("sim_real_rl_co_training", False):
+        if use_distributed_channels:
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
             actor_channel_maxsize = int(buffer_cfg.get("channel_maxsize", 1))
-        self.actor_channel = Channel.create("Actor", maxsize=actor_channel_maxsize)
+        self.actor_channel = Channel.create(
+            "Actor",
+            maxsize=actor_channel_maxsize,
+            distributed=use_distributed_channels,
+        )
         if self.reward is not None:
             self.reward_channel = Channel.create("Reward")
         else:
