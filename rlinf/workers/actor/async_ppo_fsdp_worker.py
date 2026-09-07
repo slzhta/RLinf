@@ -183,6 +183,19 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         generator.manual_seed(int(self.cfg.actor.seed) + int(self._rank))
         shuffle_id = torch.randperm(total_samples, generator=generator)
 
+        snapshot = None
+        if (
+            self.cfg.actor.get("debug_first_update", {}).get("enabled", False)
+            and not getattr(self, "_first_update_snapshot_saved", False)
+            and self.optimizer_steps == 0
+            and int(self.version) == 0
+        ):
+            from rlinf.utils.ppo_update_snapshot import FirstPPOUpdateSnapshot
+
+            snapshot = FirstPPOUpdateSnapshot(self, shuffle_id)
+            self._first_update_snapshot_saved = True
+            self.log_info(f"First PPO update snapshot: {snapshot.directory}")
+
         with torch.no_grad():
             self.rollout_batch = flatten_rollout_batch_for_train(
                 self.rollout_batch, shuffle_id
@@ -381,6 +394,8 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                 if len(lr_list) > 1:
                     extra_metrics["critic/lr"] = lr_list[1]
                 append_to_dict(metrics, extra_metrics)
+                if snapshot is not None:
+                    snapshot.save_step(self)
 
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
@@ -391,4 +406,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
             mean_metric_dict,
             op=torch.distributed.ReduceOp.AVG,
         )
+        if snapshot is not None:
+            snapshot.finish(self, metrics, mean_metric_dict)
+            self.log_info(f"First PPO update snapshot complete: {snapshot.directory}")
         return mean_metric_dict
