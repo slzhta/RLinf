@@ -63,6 +63,23 @@ class SafePDJointPosMimicController(PDJointPosMimicController):
         clipped_legacy = torch.clamp(action, min=-1.0, max=1.0)
         return 0.5 * (clipped_legacy + 1.0)
 
+    @property
+    def gripper_open_state(self) -> torch.Tensor:
+        """Return the controller's binary open/closed state for every environment."""
+        if not self.config.binary_gripper_action:
+            raise RuntimeError(
+                "gripper_open_state is only available when binary_gripper_action=True."
+            )
+        if self._gripper_open_state is None:
+            target_shape = (self.scene.num_envs, self.single_action_space.shape[0])
+            current_action = self._infer_action_from_current_qpos(
+                target_shape=target_shape,
+                dtype=self.qpos.dtype,
+                device=self.device,
+            )
+            return current_action >= self._binary_state_boundary
+        return self._gripper_open_state
+
     def _infer_action_from_current_qpos(
         self,
         target_shape: tuple[int, int],

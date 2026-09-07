@@ -624,12 +624,20 @@ class PickAndPlaceDigitalTwinEnv(DigitalTwinBaseEnv):
 
     def _build_extracted_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
         extracted_obs = super()._build_extracted_obs(raw_obs)
-        qpos = self.agent.robot.get_qpos().to(torch.float32)
-        gripper_width = qpos[:, -2:].sum(dim=1, keepdim=True)
-        max_gripper_width = 2.0 * self.OPEN_GRIPPER_QPOS
-        gripper_open_state = (
-            2.0 * torch.clamp(gripper_width / max_gripper_width, min=0.0, max=1.0) - 1.0
-        )
+        gripper_controller = self.agent.controller.controllers.get("gripper")
+        if gripper_controller is None or not hasattr(
+            gripper_controller, "gripper_open_state"
+        ):
+            raise RuntimeError(
+                "PickAndPlaceDigitalTwinEnv requires the binary safe gripper "
+                "controller to build its 14-dimensional state."
+            )
+        binary_open_state = gripper_controller.gripper_open_state
+        gripper_open_state = torch.where(
+            binary_open_state,
+            torch.ones_like(binary_open_state, dtype=torch.float32),
+            -torch.ones_like(binary_open_state, dtype=torch.float32),
+        ).to(extracted_obs["states"].device)
         extracted_obs["states"] = torch.cat(
             [extracted_obs["states"], gripper_open_state], dim=1
         )
