@@ -1,0 +1,213 @@
+defaults:
+  - env/maniskill_peg_insertion_co_rl@env.train
+  - env/maniskill_peg_insertion_co_rl@env.eval
+  - env/realworld_peg_insertion_co_rl@env.train.co_training_env_cfg
+  - env/realworld_peg_insertion_co_rl@env.eval.co_training_env_cfg
+  - model/cnn_policy@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 3
+  component_placement:
+    actor:
+      node_group: sim
+      placement: 0
+    env:
+      node_group: real,sim
+      placement: 0:0,2:1
+    rollout:
+      node_group: sim
+      placement: 0-1
+  node_groups:
+    - label: real
+      node_ranks: 0
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: 192.168.1.2
+            node_rank: 0
+    - label: sim
+      node_ranks: 1-2
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH,./results}
+    project_name: rlinf
+    experiment_name: co_rl_peg_insertion_async_ppo_cnn_wrist_state
+    logger_backends: [tensorboard]
+  max_epochs: 500
+  max_steps: 500
+  only_eval: false
+  val_check_interval: -1
+  save_interval: 10
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  sim_real_rl_co_training: true
+  co_training_rollout_routing_mode: paired
+  co_training_domain_buffer:
+    mode: latest
+    channel_maxsize: 1
+    sample_rollout_length: 36
+    real_ratio_min: 0.05
+    real_ratio_target: 0.10
+    real_ratio_max: 0.15
+  normalize_advantages: true
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+  staleness_threshold: 2
+  behave_weight_threshold: 5
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: chunk_level
+  update_epoch: 2
+  adv_type: gae
+  loss_type: decoupled_actor_critic
+  loss_agg_func: token-mean
+  kl_beta: 0.0
+  entropy_bonus: 0.002
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  value_loss_coef: 0.25
+  huber_delta: 10.0
+  gamma: 0.99
+  gae_lambda: 0.95
+  bootstrap_type: none
+  filter_rewards: false
+  rewards_lower_bound: 0.0
+  rewards_upper_bound: 1.0
+  sampling_params:
+    do_sample: true
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+peg_task:
+  target_ee_pose: [0.545, 0.035, 0.048, 3.141592653589793, 0.0, 0.0]
+
+env:
+  group_name: EnvGroup
+  train:
+    total_num_envs: 32
+    num_workers: 1
+    init_params:
+      peg_config: ${peg_task}
+    video_cfg:
+      save_video: true
+      info_on_video: false
+      fps: 10
+      record_rollout_interval: 1
+      video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/sim
+    co_training_env_cfg:
+      total_num_envs: 1
+      num_workers: 1
+      video_cfg:
+        save_video: true
+        info_on_video: true
+        fps: 10
+        record_rollout_interval: 1
+        video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/real
+      override_cfg:
+        peg_config: ${peg_task}
+        setup_confirmed: false
+        camera_serials: ["REPLACE_WITH_WRIST_SERIAL"]
+  eval:
+    total_num_envs: 8
+    num_workers: 1
+    auto_reset: false
+    seed: 50000
+    init_params:
+      peg_config: ${peg_task}
+    video_cfg:
+      save_video: false
+    co_training_env_cfg:
+      total_num_envs: 1
+      num_workers: 1
+      video_cfg:
+        save_video: false
+      override_cfg: ${env.train.co_training_env_cfg.override_cfg}
+
+rollout:
+  group_name: RolloutGroup
+  backend: huggingface
+  enable_offload: false
+  pipeline_stage_num: 1
+  sync_weight_nccl_max_ctas: 32
+  model:
+    model_path: "../co-training-assets/models"
+    precision: ${actor.model.precision}
+    num_q_heads: 10
+  enable_torch_compile: true
+  enable_cuda_graph: false
+
+actor:
+  group_name: ActorGroup
+  training_backend: fsdp
+  initial_checkpoint_exclude_keys: [actor_logstd]
+  micro_batch_size: 120
+  global_batch_size: 240
+  seed: 1234
+  enable_offload: false
+  model:
+    model_path: "../co-training-assets/models"
+    add_value_head: true
+    add_q_head: false
+    use_state: true
+    state_dim: 6
+    action_dim: 6
+    num_action_chunks: 1
+    image_num: 1
+    initial_logstd: -1.0
+    logstd_range: [-4.0, -1.0]
+    binary_action_indices: []
+    binary_action_temperature: 1.0
+    action_std_scale: [1, 1, 1, 1, 1, 1]
+    encoder_config:
+      ckpt_name: resnet10_pretrained.pt
+      dropout: 0.0
+      freeze_backbone: false
+  optim:
+    lr: 1.0e-5
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-5
+    weight_decay: 1.0e-6
+    clip_grad: 1.0
+    critic_warmup_steps: 5
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: no_shard
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

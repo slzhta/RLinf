@@ -184,7 +184,7 @@ class FrankaEnv(gym.Env):
                     f"Waited {time.time() - start_time} seconds for Franka robot to be ready."
                 )
 
-        self._interpolate_move(self._reset_pose)
+        self._initialize_robot_pose()
         time.sleep(1.0)
         self._franka_state = self._controller.get_state().wait()[0]
 
@@ -196,6 +196,9 @@ class FrankaEnv(gym.Env):
     @property
     def task_description(self):
         return self._task_description
+
+    def _initialize_robot_pose(self):
+        self._interpolate_move(self._reset_pose)
 
     def _setup_hardware(self):
         from .franka_controller import FrankaController

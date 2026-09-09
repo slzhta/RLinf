@@ -22,6 +22,9 @@ from rlinf.envs.maniskill.tasks.digital_twin.constants import (
 from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
     DigitalTwinBaseEnv,
 )
+from rlinf.envs.maniskill.tasks.digital_twin.peg_insertion import (
+    PegInsertionDigitalTwinEnv,
+)
 from rlinf.envs.maniskill.tasks.digital_twin.pick_and_place import (
     PickAndPlaceDigitalTwinEnv,
 )
@@ -36,4 +39,5 @@ __all__ = [
     "PANDA_UMI_REFERENCE_QPOS",
     "PickAndPlaceDigitalTwinEnv",
     "PushButtonEnv",
+    "PegInsertionDigitalTwinEnv",
 ]

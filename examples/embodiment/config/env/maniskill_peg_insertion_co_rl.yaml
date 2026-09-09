@@ -1,0 +1,43 @@
+env_type: maniskill
+total_num_envs: null
+auto_reset: true
+ignore_terminations: false
+use_rel_reward: false
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: false
+max_steps_per_rollout_epoch: 120
+max_episode_steps: 120
+reward_mode: raw
+wrap_obs_mode: raw
+include_states_in_obs: true
+use_config_control_mode: true
+enable_offload: false
+
+video_cfg:
+  save_video: false
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: PegInsertionDigitalTwin-v1
+  num_envs: null
+  obs_mode: rgb+segmentation
+  control_mode: pd_ee_body_target_delta_pose_real
+  sim_backend: gpu
+  sim_config:
+    sim_freq: 500
+    control_freq: 10
+    scene_config:
+      contact_offset: 0.0005
+      rest_offset: 0.0
+  max_episode_steps: ${env.train.max_episode_steps}
+  sensor_configs:
+    shader_pack: default
+  render_mode: rgb_array
+  reward_mode: dense
+  use_hand_camera: true
+  synchronize_render: false
+  robot_init_qpos_noise: 0.0
+  domain_randomization:
+    enabled: false
