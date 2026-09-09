@@ -106,7 +106,11 @@ algorithm:
     min_length: 1
 
 peg_task:
-  target_ee_pose: [0.545, 0.035, 0.048, 3.141592653589793, 0.0, 0.0]
+  target_ee_pose: null
+  workspace_xy: 0.15
+  workspace_above: 0.15
+  workspace_below: 0.025
+  rotation_limits: [0.01, 0.01, 0.5]
 
 env:
   group_name: EnvGroup
@@ -132,8 +136,7 @@ env:
         video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/real
       override_cfg:
         peg_config: ${peg_task}
-        setup_confirmed: false
-        camera_serials: ["REPLACE_WITH_WRIST_SERIAL"]
+        camera_serials: ["141722075170"]
   eval:
     total_num_envs: 8
     num_workers: 1
@@ -157,7 +160,7 @@ rollout:
   pipeline_stage_num: 1
   sync_weight_nccl_max_ctas: 32
   model:
-    model_path: "../co-training-assets/models"
+    model_path: "/mnt/RLinf"
     precision: ${actor.model.precision}
     num_q_heads: 10
   enable_torch_compile: true
@@ -172,7 +175,7 @@ actor:
   seed: 1234
   enable_offload: false
   model:
-    model_path: "../co-training-assets/models"
+    model_path: "/mnt/RLinf"
     add_value_head: true
     add_q_head: false
     use_state: true

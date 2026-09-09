@@ -35,11 +35,8 @@ from .co_training_base_env import FrankaCoTrainingBaseConfig, FrankaCoTrainingBa
 @dataclass
 class FrankaCoTrainingPegInsertionConfig(FrankaCoTrainingBaseConfig):
     peg_config: dict = field(default_factory=dict)
-    setup_confirmed: bool = False
     max_contact_force: float = 20.0
     max_contact_torque: float = 3.0
-    reset_linear_speed: float = 0.015
-    reset_angular_speed: float = 0.10
     max_num_steps: int = 120
     task_description: str = (
         "Insert the green U-shaped peg into the matching hole in the blue board"
@@ -47,10 +44,6 @@ class FrankaCoTrainingPegInsertionConfig(FrankaCoTrainingBaseConfig):
 
     def __post_init__(self):
         geometry = PegInsertionGeometry(**self.peg_config)
-        if not self.is_dummy and self.setup_confirmed is not True:
-            raise ValueError(
-                "Calibrate peg_config.target_ee_pose and explicitly set setup_confirmed=true before using hardware."
-            )
         if not self.is_dummy and self.camera_serials is not None:
             if not self.camera_serials or any(
                 not str(serial) or str(serial).startswith("REPLACE_")
@@ -62,8 +55,6 @@ class FrankaCoTrainingPegInsertionConfig(FrankaCoTrainingBaseConfig):
         for name in (
             "max_contact_force",
             "max_contact_torque",
-            "reset_linear_speed",
-            "reset_angular_speed",
         ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive and finite.")
@@ -95,15 +86,7 @@ class FrankaCoTrainingPegInsertionConfig(FrankaCoTrainingBaseConfig):
             0.5,
             0.5,
         ]
-        if not self.compliance_param:
-            self.compliance_param = {
-                "translational_stiffness": 500,
-                "translational_damping": 45,
-                "rotational_stiffness": 50,
-                "rotational_damping": 5,
-                "translational_Ki": 0.0,
-                "rotational_Ki": 0.0,
-            }
+        self.compliance_param = FrankaCoTrainingBaseConfig().compliance_param
         self.precision_param = self.compliance_param.copy()
         FrankaRobotConfig.__post_init__(self)
 
@@ -176,6 +159,7 @@ class FrankaCoTrainingPegInsertionEnv(FrankaCoTrainingBaseEnv):
         if self.config.is_dummy:
             self._franka_state.tcp_pose = np.asarray(position).copy()
             return
+        self._clear_error()
         self._controller.move_arm(np.asarray(position, dtype=np.float32)).wait()
 
     def _clip_position_to_safety_box(self, pose):
@@ -185,29 +169,7 @@ class FrankaCoTrainingPegInsertionEnv(FrankaCoTrainingBaseEnv):
         self._controller.reconfigure_compliance_params(
             self.config.compliance_param
         ).wait()
-        self.go_to_rest()
-
-    def _reset_move(self, destination):
-        current = pose_matrix(self._checked_state().tcp_pose)
-        distance = np.linalg.norm(destination[:3, 3] - current[:3, 3])
-        angle = Rotation.from_matrix(
-            destination[:3, :3] @ current[:3, :3].T
-        ).magnitude()
-        duration = max(
-            1.0,
-            distance / self.config.reset_linear_speed,
-            angle / self.config.reset_angular_speed,
-        )
-        self._interpolate_move(matrix_pose(destination), timeout=duration)
-        actual = pose_matrix(self._checked_state().tcp_pose)
-        if (
-            np.linalg.norm(actual[:3, 3] - destination[:3, 3]) > 0.003
-            or Rotation.from_matrix(actual[:3, :3] @ destination[:3, :3].T).magnitude()
-            > 0.03
-        ):
-            self._safety_fault = "Reset waypoint not reached; refusing subsequent lateral/rotation motion."
-            self._controller.move_arm(matrix_pose(actual).astype(np.float32)).wait()
-            raise RuntimeError(self._safety_fault)
+        super()._initialize_robot_pose()
 
     def go_to_rest(self, joint_reset=False):
         if joint_reset:
@@ -230,17 +192,34 @@ class FrankaCoTrainingPegInsertionEnv(FrankaCoTrainingBaseEnv):
             raise RuntimeError(
                 "Move the tool manually into the calibrated insertion workspace before startup/reset."
             )
-        axes = geometry.insertion_rotation
-        height = np.dot(current[:3, 3] - geometry.target[:3, 3], axes[:, 2])
-        withdraw = current.copy()
-        withdraw[:3, 3] += axes[:, 2] * max(0.0, geometry.reset_height - height)
-        self._reset_move(withdraw)
-        self._reset_move(geometry.reset_pose(self.np_random))
+        self._move_action(self._franka_state.tcp_pose)
+        time.sleep(0.5)
+        self._franka_state = self._controller.get_state().wait()[0]
+        lift_pose = self._franka_state.tcp_pose.copy()
+        lift_pose[2] += 0.10
+        self._interpolate_move(lift_pose, timeout=1)
+
+        reset_pose = matrix_pose(geometry.reset_pose(self.np_random))
+        self._franka_state = self._controller.get_state().wait()[0]
+        count = 0
+        while not np.allclose(self._franka_state.tcp_pose[:3], reset_pose[:3], 0.02):
+            count += 1
+            self._interpolate_move(reset_pose)
+            self._franka_state = self._controller.get_state().wait()[0]
+            if count > 2:
+                break
 
     def reset(self, joint_reset=False, seed=None, options=None):
         gym.Env.reset(self, seed=seed)
         self._checked_state()
+        if not self.config.is_dummy:
+            self._controller.reconfigure_compliance_params(
+                self.config.compliance_param
+            ).wait()
         self.go_to_rest(joint_reset=joint_reset)
+        if not self.config.is_dummy:
+            self._clear_error()
+            self._franka_state = self._controller.get_state().wait()[0]
         self._num_steps = 0
         self._success_hold_counter = 0
         self._target_pose = self._franka_state.tcp_pose.copy()
