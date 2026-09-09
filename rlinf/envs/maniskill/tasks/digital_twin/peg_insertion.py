@@ -81,6 +81,7 @@ class PegInsertionDigitalTwinEnv(DigitalTwinBaseEnv):
         "Insert the green U-shaped peg into the matching hole in the blue board"
     )
     FINGER_QPOS = 0.0533628067 / 2
+    ROBOT_INITIAL_POSITION = np.array([-0.615, 0.0, 0.055], dtype=np.float32)
 
     def __init__(self, *args, peg_config=None, **kwargs):
         self.peg_config = dict(peg_config or {})
@@ -101,7 +102,7 @@ class PegInsertionDigitalTwinEnv(DigitalTwinBaseEnv):
         }
         sim_config = dict(kwargs.pop("sim_config", {}) or {})
         scene_config = dict(sim_config.get("scene_config", {}) or {})
-        scene_config.update(contact_offset=0.0005, rest_offset=0.0)
+        scene_config.update(contact_offset=0.0001, rest_offset=0.0)
         sim_config.update(scene_config=scene_config)
         kwargs["sim_config"] = sim_config
         super().__init__(*args, **kwargs)
@@ -116,7 +117,7 @@ class PegInsertionDigitalTwinEnv(DigitalTwinBaseEnv):
             self.scene,
             self._control_freq,
             self._control_mode,
-            initial_pose=sapien.Pose([-0.615, 0, 0]),
+            initial_pose=sapien.Pose(self.ROBOT_INITIAL_POSITION),
             controller_alignment=self.controller_alignment,
             enable_hand_camera=True,
             peg_config=self.peg_config,
@@ -124,6 +125,16 @@ class PegInsertionDigitalTwinEnv(DigitalTwinBaseEnv):
 
     def _load_task_scene(self, options):
         self.peg = self.agent.robot.links_map["u_peg_fixed_tool"]
+        table_material = sapien.render.RenderMaterial(
+            base_color=[0.38, 0.56, 0.26, 1], roughness=1.0
+        )
+        for entity in self.table_scene.table._objs:
+            self._replace_mesh_material(entity, table_material)
+        peg_material = sapien.render.RenderMaterial(
+            base_color=[0.03, 0.85, 0.10, 1], roughness=0.7
+        )
+        for body in self.peg._objs:
+            self._replace_mesh_material(body.entity, peg_material)
         for name in (
             "u_peg_fixed_tool",
             "panda_hand",
@@ -143,20 +154,37 @@ class PegInsertionDigitalTwinEnv(DigitalTwinBaseEnv):
         builder.add_visual_from_file(
             filename,
             material=sapien.render.RenderMaterial(
-                base_color=[0.04, 0.17, 0.85, 1], roughness=0.7
+                base_color=[0.008, 0.07, 1.0, 1], roughness=0.7
             ),
         )
         world_board = self.geometry.board_pose()
-        world_board[:3, 3] += [-0.615, 0, 0]
+        world_board[:3, 3] += self.ROBOT_INITIAL_POSITION
         pose = matrix_pose(world_board)
         builder.initial_pose = sapien.Pose(pose[:3], pose[[6, 3, 4, 5]])
         self.board = builder.build_static(name="u_socket_board")
+
+    @staticmethod
+    def _replace_mesh_material(
+        entity: sapien.Entity, material: sapien.render.RenderMaterial
+    ) -> None:
+        """Use task-local visuals without mutating cached asset materials."""
+        original = entity.find_component_by_type(sapien.render.RenderBodyComponent)
+        replacement = sapien.render.RenderBodyComponent()
+        for shape in original.render_shapes:
+            mesh = sapien.render.RenderShapeTriangleMesh(
+                shape.filename, scale=shape.scale, material=material
+            )
+            mesh.local_pose = shape.local_pose
+            replacement.attach(mesh)
+        entity.remove_component(original)
+        entity.add_component(replacement)
 
     def _get_foreground_actors(self):
         return [self.board]
 
     def _initialize_episode(self, env_idx, options):
         super()._initialize_episode(env_idx, options)
+        self.agent.robot.set_pose(sapien.Pose(self.ROBOT_INITIAL_POSITION))
         self.sync_gpu_articulation_state()
         qpos = self.agent.robot.get_qpos().clone()
         targets = np.asarray(
