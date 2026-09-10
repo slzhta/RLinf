@@ -273,6 +273,24 @@ class CNNPolicy(nn.Module, BasePolicy):
             )
         return action_std
 
+    def _continuous_action_statistics(
+        self,
+        action_mean: torch.Tensor,
+        action_std: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        scale = self.action_scale if self.action_scale is not None else 1.0
+        bias = self.action_bias if self.action_scale is not None else 0.0
+        bounded_action = ((action.float() - bias) / scale).clamp(
+            -1.0 + 1e-6, 1.0 - 1e-6
+        )
+        latent_action = torch.atanh(bounded_action)
+        probs = Normal(action_mean.float(), action_std.float())
+        logprobs = probs.log_prob(latent_action) - torch.log(
+            scale * (1.0 - bounded_action.square()) + 1e-6
+        )
+        return logprobs, probs.entropy()
+
     def _hybrid_action_statistics(
         self,
         action_mean: torch.Tensor,
@@ -461,11 +479,13 @@ class CNNPolicy(nn.Module, BasePolicy):
             if compute_entropy:
                 output_dict.update(entropy=entropy)
         else:
-            probs = Normal(action_mean, action_std)
+            logprobs, entropy = self._continuous_action_statistics(
+                action_mean, action_std, action
+            )
             if compute_logprobs:
-                output_dict.update(logprobs=probs.log_prob(action))
+                output_dict.update(logprobs=logprobs)
             if compute_entropy:
-                output_dict.update(entropy=probs.entropy())
+                output_dict.update(entropy=entropy)
         if compute_values:
             if getattr(self, "value_head", None):
                 values = self.value_head(mix_feature)
@@ -553,15 +573,14 @@ class CNNPolicy(nn.Module, BasePolicy):
                 raw_action = probs.rsample() if use_rsample else probs.sample()
             else:
                 raw_action = action_mean.clone()
-            chunk_logprobs = probs.log_prob(raw_action)
+            action_normalized = torch.tanh(raw_action)
             if self.action_scale is not None:
-                action_normalized = torch.tanh(raw_action)
                 action = action_normalized * self.action_scale + self.action_bias
-                chunk_logprobs = chunk_logprobs - torch.log(
-                    self.action_scale * (1 - action_normalized.pow(2)) + 1e-6
-                )
             else:
-                action = raw_action
+                action = action_normalized
+            chunk_logprobs, _ = self._continuous_action_statistics(
+                action_mean, action_std, action
+            )
 
         chunk_actions = action.reshape(
             -1, self.cfg.num_action_chunks, self.cfg.action_dim
