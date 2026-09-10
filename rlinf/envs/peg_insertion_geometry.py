@@ -43,9 +43,9 @@ class PegInsertionGeometry:
     )
     action_scale: list = field(default_factory=lambda: [0.002, 0.02])
     reset_height: float = 0.10
-    random_xy: float = 0.005
-    random_yaw: float = 0.05
-    workspace_xy: float = 0.03
+    random_xy: float = 0.05
+    random_yaw: float = np.deg2rad(10.0)
+    workspace_xy: float = 0.05
     workspace_above: float = 0.14
     workspace_below: float = 0.001
     rotation_limits: list = field(default_factory=lambda: [0.05, 0.05, 0.30])
