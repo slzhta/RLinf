@@ -49,9 +49,9 @@ class PegInsertionGeometry:
     workspace_above: float = 0.14
     workspace_below: float = 0.001
     rotation_limits: list = field(default_factory=lambda: [0.05, 0.05, 0.30])
-    success_xy: float = 0.001
-    success_z: float = 0.002
-    success_angle: float = 0.03
+    success_xy: float = 0.01
+    success_z: float = 0.01
+    success_angle: float = np.deg2rad(5.0)
     success_hold_steps: int = 3
     dense_reward_scale: float = 0.05
 

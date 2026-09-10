@@ -1,4 +1,4 @@
-"""CPU checks for target-frame peg reset randomization."""
+"""CPU checks for target-frame peg reset and success geometry."""
 
 import unittest
 
@@ -39,6 +39,38 @@ class PegResetTests(unittest.TestCase):
         self.assertLess(angles.min(), np.deg2rad(-9.0))
         self.assertGreater(angles.max(), np.deg2rad(9.0))
         np.testing.assert_allclose(geometry.clip_target(poses), poses, atol=1e-12)
+
+
+class PegSuccessTests(unittest.TestCase):
+    def test_default_success_tolerances(self):
+        geometry = PegInsertionGeometry()
+        self.assertAlmostEqual(geometry.success_xy, 0.01)
+        self.assertAlmostEqual(geometry.success_z, 0.01)
+        self.assertAlmostEqual(np.rad2deg(geometry.success_angle), 5.0)
+        self.assertEqual(geometry.success_hold_steps, 3)
+
+    def test_success_requires_all_tolerances_in_insertion_frame(self):
+        geometry = PegInsertionGeometry(
+            target_ee_pose=[0.6278, 0.0982, -0.0022, 3.0966, 0.0119, -0.0119],
+        )
+        cases = [
+            ([0.006, 0.007, 0.0099], 4.999, True),
+            ([0.0, 0.0, -0.0099], 0.0, True),
+            ([0.008, 0.008, 0.0], 0.0, False),
+            ([0.0101, 0.0, 0.0], 0.0, False),
+            ([0.0, 0.0, 0.0101], 0.0, False),
+            ([0.0, 0.0, -0.0101], 0.0, False),
+            ([0.0, 0.0, 0.0], 5.001, False),
+        ]
+        for offset, degrees, expected in cases:
+            with self.subTest(offset=offset, degrees=degrees):
+                current = geometry.target.copy()
+                current[:3, 3] += geometry.insertion_rotation @ np.asarray(offset)
+                rotvec = np.ones(3) * np.deg2rad(degrees) / np.sqrt(3)
+                current[:3, :3] = (
+                    geometry.target[:3, :3] @ Rotation.from_rotvec(rotvec).as_matrix()
+                )
+                self.assertEqual(bool(geometry.metrics(current)["in_target"]), expected)
 
 
 if __name__ == "__main__":
