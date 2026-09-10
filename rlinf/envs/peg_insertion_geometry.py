@@ -77,11 +77,10 @@ class PegInsertionGeometry:
             "success_xy",
             "success_z",
             "success_angle",
-            "dense_reward_scale",
         ):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive and finite.")
-        for name in ("random_xy", "random_yaw", "workspace_below"):
+        for name in ("random_xy", "random_yaw", "workspace_below", "dense_reward_scale"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be nonnegative and finite.")
         if not 0.05 <= self.reset_height <= self.workspace_above:

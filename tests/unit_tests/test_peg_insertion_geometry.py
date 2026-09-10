@@ -73,5 +73,24 @@ class PegSuccessTests(unittest.TestCase):
                 self.assertEqual(bool(geometry.metrics(current)["in_target"]), expected)
 
 
+class PegRewardScaleTests(unittest.TestCase):
+    def test_zero_scale_preserves_success_geometry(self):
+        dense = PegInsertionGeometry()
+        sparse = PegInsertionGeometry(dense_reward_scale=0.0)
+        poses = np.stack([dense.target, dense.reset_pose(np.random.default_rng(0))])
+        dense_metrics = dense.metrics(poses)
+        sparse_metrics = sparse.metrics(poses)
+        np.testing.assert_array_equal(sparse_metrics["dense_reward"], [0.0, 0.0])
+        np.testing.assert_array_equal(sparse_metrics["in_target"], [True, False])
+        for key in ("xy_error", "z_error", "angle_error", "in_target"):
+            np.testing.assert_array_equal(sparse_metrics[key], dense_metrics[key])
+        self.assertAlmostEqual(dense_metrics["dense_reward"][0], 0.05)
+
+    def test_invalid_scale_is_rejected(self):
+        for scale in (-0.01, 1.0, 1.1, np.nan, np.inf, -np.inf):
+            with self.subTest(scale=scale), self.assertRaises(ValueError):
+                PegInsertionGeometry(dense_reward_scale=scale)
+
+
 if __name__ == "__main__":
     unittest.main()

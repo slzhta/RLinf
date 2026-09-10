@@ -35,8 +35,8 @@ from .co_training_base_env import FrankaCoTrainingBaseConfig, FrankaCoTrainingBa
 @dataclass
 class FrankaCoTrainingPegInsertionConfig(FrankaCoTrainingBaseConfig):
     peg_config: dict = field(default_factory=dict)
-    max_contact_force: float = 200.0
-    max_contact_torque: float = 30.0
+    max_contact_force: float = 40.0
+    max_contact_torque: float = 6.0
     max_num_steps: int = 120
     task_description: str = (
         "Insert the green U-shaped peg into the matching hole in the blue board"
