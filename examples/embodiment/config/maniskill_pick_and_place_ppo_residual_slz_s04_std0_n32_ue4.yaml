@@ -1,0 +1,37 @@
+defaults:
+  - maniskill_pick_and_place_ppo_residual_a4
+  - _self_
+
+cluster:
+  component_placement:
+    actor: 2
+    env,rollout: 2-3
+
+runner:
+  max_epochs: 100
+  save_interval: 50
+  val_check_interval: 50
+  resume_dir: null
+  ckpt_path: null
+  logger:
+    experiment_name: residual_slz_s04_std0_n32_ue4
+
+algorithm:
+  update_epoch: 4
+
+actor:
+  global_batch_size: 256
+  micro_batch_size: 128
+  optim:
+    lr: 2.0e-5
+  model:
+    residual_action_scale: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.0]
+    initial_logstd: 0.0
+    logstd_range: [-3.0, 0.0]
+
+env:
+  train:
+    total_num_envs: 32
+    video_cfg:
+      save_video: true
+      record_rollout_interval: 10

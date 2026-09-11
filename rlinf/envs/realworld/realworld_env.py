@@ -270,8 +270,8 @@ class RealWorldEnv(gym.Env):
             ]
             if missing_keys:
                 raise KeyError(
-                    f"Configured state_keys are missing from the observation: {missing_keys}. "
-                    f"Available keys: {list(raw_obs['state'])}."
+                    f"Configured state_keys are missing from the observation: "
+                    f"{missing_keys}. Available keys: {list(raw_obs['state'])}."
                 )
             full_states.extend(raw_obs["state"][key] for key in self.state_keys)
         else:

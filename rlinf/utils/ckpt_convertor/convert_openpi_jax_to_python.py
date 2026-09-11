@@ -649,13 +649,33 @@ def convert_pi0_checkpoint(
         pi0_model, os.path.join(output_path, "model.safetensors")
     )
 
-    # Copy assets folder if it exists
-    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
+    # Orbax training checkpoints store normalization assets inside each step
+    # directory. Keep the legacy parent lookup as a fallback for older layouts.
+    checkpoint_path = pathlib.Path(checkpoint_dir)
+    assets_source = checkpoint_path / "assets"
+    if not assets_source.exists():
+        assets_source = checkpoint_path.parent / "assets"
     if assets_source.exists():
         assets_dest = pathlib.Path(output_path) / "assets"
         if assets_dest.exists():
             shutil.rmtree(assets_dest)
         shutil.copytree(assets_source, assets_dest)
+
+        # RLinf's OpenPI loader calls load_norm_stats(checkpoint_dir,
+        # asset_id), which expects <output_path>/<asset_id>/norm_stats.json.
+        # Preserve the conventional assets/ copy and also expose each asset at
+        # the checkpoint root for direct inference loading.
+        for asset_source in assets_source.iterdir():
+            asset_dest = pathlib.Path(output_path) / asset_source.name
+            if asset_dest.exists():
+                if asset_dest.is_dir():
+                    shutil.rmtree(asset_dest)
+                else:
+                    asset_dest.unlink()
+            if asset_source.is_dir():
+                shutil.copytree(asset_source, asset_dest)
+            else:
+                shutil.copy2(asset_source, asset_dest)
 
     # Save config as JSON for reference
     config_dict = {

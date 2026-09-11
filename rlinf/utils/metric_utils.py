@@ -187,19 +187,10 @@ def compute_loss_mask(dones):
 
 
 def compute_abort_loss_mask(dones, abort_flags):
-    """Mask every transition in episodes ended by an operator abort.
-
-    Args:
-        dones: Episode-boundary flags with shape ``[T + 1, B, C]``.
-        abort_flags: Abort flags aligned with ``dones``.
-
-    Returns:
-        A tuple of the boolean loss mask and its per-trajectory valid count,
-        both with shape ``[T, B, C]``.
-    """
+    """Mask all transitions in episodes ended by an operator abort."""
     if dones.shape != abort_flags.shape:
         raise ValueError(
-            f"dones and abort_flags must have the same shape, got "
+            "dones and abort_flags must have the same shape, got "
             f"{dones.shape} and {abort_flags.shape}."
         )
     if dones.ndim != 3 or dones.shape[0] < 2:

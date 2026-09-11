@@ -87,6 +87,7 @@ from rlinf.utils.utils import (
     get_loss_agg_func,
     masked_mean,
     reshape_entropy,
+    reshape_entropy_mask,
     retrieve_model_state_dict_in_cpu,
 )
 from rlinf.workers.rollout.utils import RankMapper
@@ -127,35 +128,6 @@ def process_nested_dict_for_train(nested_dict, shuffle_id):
         elif isinstance(value, dict):
             ret_dict[key] = process_nested_dict_for_train(value, shuffle_id)
     return ret_dict
-
-
-def index_flattened_batch(nested_dict, indices):
-    """Apply one sample permutation to an already flattened rollout batch."""
-    ret_dict = {}
-    for key, value in nested_dict.items():
-        if value is None:
-            ret_dict[key] = None
-        elif isinstance(value, torch.Tensor):
-            ret_dict[key] = value.index_select(0, indices)
-        elif isinstance(value, dict):
-            ret_dict[key] = index_flattened_batch(value, indices)
-        else:
-            raise TypeError(f"Unsupported rollout value for {key}: {type(value)}")
-    return ret_dict
-
-
-def make_rollout_permutation(
-    rollout_size: int,
-    seed: int,
-    rank: int,
-    global_step: int,
-    epoch: int,
-    update_epoch: int,
-) -> torch.Tensor:
-    """Build a reproducible permutation that changes by PPO step and epoch."""
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed + rank + global_step * update_epoch + epoch)
-    return torch.randperm(rollout_size, generator=generator)
 
 
 class FSDPActor(FSDPModelManager, Worker):
@@ -1059,6 +1031,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._co_training_buffer_metrics: dict[str, float] = {}
             self._real_env_interaction_steps = 0
             self._sim_env_interaction_steps = 0
+            self._domain_buffer_dropped_rollouts = {"real": 0, "sim": 0}
             (
                 self._train_batch_steps,
                 self._min_train_real_steps,
@@ -1102,6 +1075,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "max_sim_buffer_steps must be >= one sim worker rollout in "
                 "trajectory units."
             )
+            self._configure_domain_buffer_mode(buffer_cfg)
             self._next_real_env_rank_idx = 0
             self._next_sim_env_rank_idx = 0
         if self.enable_sft_co_train:
@@ -1144,7 +1118,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             model = super().model_provider_func()
 
         if self.cfg.runner.get("ckpt_path", None):
-            self._validate_initial_model_checkpoint(self.cfg.runner.ckpt_path)
             model_dict = torch.load(
                 self.cfg.runner.ckpt_path,
                 map_location="cpu",
@@ -1163,9 +1136,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
             for key in excluded_keys:
                 model_dict.pop(key)
-            incompatible = model.load_state_dict(
-                model_dict, strict=not excluded_keys
-            )
+            incompatible = model.load_state_dict(model_dict, strict=not excluded_keys)
             if set(incompatible.missing_keys) != set(excluded_keys) or (
                 incompatible.unexpected_keys
             ):
@@ -1176,39 +1147,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
         return model
-
-    def _validate_initial_model_checkpoint(self, checkpoint_path: str) -> None:
-        """Validate optional BC metadata before initializing a PPO policy."""
-        expected_stage = self.cfg.actor.get("initial_checkpoint_stage", None)
-        if expected_stage is None:
-            return
-
-        actor_checkpoint_dir = os.path.dirname(os.path.dirname(checkpoint_path))
-        marker_path = os.path.join(actor_checkpoint_dir, "bc_policy_state.pt")
-        if not os.path.isfile(marker_path):
-            raise ValueError(f"Initial checkpoint has no BC marker: {marker_path}.")
-        marker = torch.load(marker_path, map_location="cpu", weights_only=True)
-        model_cfg = self.cfg.actor.model
-        expected = {
-            "format_version": 2,
-            "training_stage": expected_stage,
-            "model_type": model_cfg.model_type,
-            "binary_action_indices": tuple(model_cfg.get("binary_action_indices", [])),
-            "binary_action_temperature": float(
-                model_cfg.get("binary_action_temperature", 1.0)
-            ),
-            "binary_loss": "bce_with_logits",
-            "continuous_action_distribution": "tanh_normal_v1",
-            "state_mean": tuple(model_cfg.get("state_mean", [])),
-            "state_std": tuple(model_cfg.get("state_std", [])),
-        }
-        actual = {key: marker.get(key) for key in expected}
-        for key in ("binary_action_indices", "state_mean", "state_std"):
-            actual[key] = tuple(actual.get(key) or ())
-        if actual != expected:
-            raise ValueError(
-                "Initial BC checkpoint is incompatible with the PPO policy config."
-            )
 
     async def sync_model_to_rollout(self) -> None:
         """
@@ -1306,7 +1244,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         min_ratio = float(buffer_cfg.get("real_ratio_min", default_real_ratio))
         max_ratio = float(buffer_cfg.get("real_ratio_max", default_real_ratio))
         assert 0.0 <= min_ratio <= target_ratio <= max_ratio <= 1.0, (
-            "Expected 0 <= real_ratio_min <= real_ratio_target <= real_ratio_max <= 1."
+            "Expected 0 <= real_ratio_min <= real_ratio_target <= "
+            "real_ratio_max <= 1."
         )
 
         min_real_steps = math.ceil(total_steps * min_ratio)
@@ -1323,7 +1262,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "Please relax real_ratio_min/max or adjust "
             "co_training_domain_buffer.sample_batch_size."
         )
-        target_real_steps = min(max(target_real_steps, min_real_steps), max_real_steps)
+        target_real_steps = min(
+            max(target_real_steps, min_real_steps), max_real_steps
+        )
 
         return (
             total_steps,
@@ -1347,7 +1288,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             )
         elif domain == "sim":
             num_envs = (
-                self.cfg.env.train.total_num_envs // self.cfg.env.train.num_workers
+                self.cfg.env.train.total_num_envs
+                // self.cfg.env.train.num_workers
             )
         else:
             raise ValueError(f"Unsupported co-training domain: {domain}")
@@ -1357,14 +1299,58 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """Allow one full domain worker rollout beyond a buffer sample."""
         return int(self._train_batch_steps + receive_steps)
 
+    def _configure_domain_buffer_mode(self, buffer_cfg: DictConfig | dict) -> None:
+        self._domain_buffer_mode = buffer_cfg.get("mode", "fifo")
+        if self._domain_buffer_mode not in ("fifo", "latest"):
+            raise ValueError("co_training_domain_buffer.mode must be fifo or latest.")
+        if self._domain_buffer_mode == "latest":
+            for domain in ("real", "sim"):
+                capacity = getattr(self, f"_max_{domain}_buffer_steps")
+                max_sample = getattr(self, f"_max_train_{domain}_steps")
+                if capacity < max_sample:
+                    raise ValueError(
+                        f"max_{domain}_buffer_steps must be >= {max_sample} "
+                        "to support the full ratio window in latest mode."
+                    )
+
+    def _append_domain_buffer_blocks(
+        self, domain: str, batches: list[dict[str, torch.Tensor]]
+    ) -> int:
+        buffer = getattr(self, f"_{domain}_batch_buffer")
+        buffer.extend(batches)
+        if self._domain_buffer_mode == "fifo":
+            return 0
+        capacity = getattr(self, f"_max_{domain}_buffer_steps")
+        dropped = max(0, len(buffer) - capacity)
+        if dropped:
+            del buffer[:dropped]
+        self._domain_buffer_dropped_rollouts[domain] += dropped
+        return dropped
+
     async def _recv_domain_buffered_batch(
         self, input_channel: Channel
     ) -> dict[str, torch.Tensor]:
         """Fill domain buffers, then take a ratio-windowed fixed-size batch."""
         real_steps_before_recv = len(self._real_batch_buffer)
         sim_steps_before_recv = len(self._sim_batch_buffer)
-        received_real_steps = 0
-        received_sim_steps = 0
+        received = {"real": 0, "sim": 0}
+        dropped = {"real": 0, "sim": 0}
+
+        async def receive(src_rank: int, domain: str) -> None:
+            trajectory = await self._recv_keyed_actor_trajectory(
+                input_channel, src_rank
+            )
+            batches = self._process_domain_trajectory(trajectory)
+            received[domain] += len(batches)
+            dropped[domain] += self._append_domain_buffer_blocks(domain, batches)
+            if domain == "real":
+                self._real_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
+            else:
+                self._sim_env_interaction_steps += (
+                    len(batches) * self._rollout_steps_per_trajectory
+                )
 
         while not self._domain_buffers_ready_for_train():
             receivable = self._next_receivable_domain_rank(input_channel)
@@ -1373,30 +1359,44 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 continue
 
             src_rank, domain = receivable
-            trajectory = await self._recv_keyed_actor_trajectory(
-                input_channel, src_rank
-            )
-            batches = self._process_domain_trajectory(trajectory)
-            if domain == "real":
-                self._real_batch_buffer.extend(batches)
-                received_real_steps += len(batches)
-                self._real_env_interaction_steps += (
-                    len(batches) * self._rollout_steps_per_trajectory
-                )
-            else:
-                self._sim_batch_buffer.extend(batches)
-                received_sim_steps += len(batches)
-                self._sim_env_interaction_steps += (
-                    len(batches) * self._rollout_steps_per_trajectory
-                )
+            await receive(src_rank, domain)
 
+        drain_messages = 0
+        drain_seconds = 0.0
+        if self._domain_buffer_mode == "latest":
+            drain_start = time.perf_counter()
+            # Snapshot once so ongoing production cannot postpone training forever.
+            pending = [
+                (rank, domain, self._keyed_actor_trajectory_qsize(input_channel, rank))
+                for domain, ranks in (
+                    ("real", self._real_env_ranks()),
+                    ("sim", self._sim_env_ranks()),
+                )
+                for rank in ranks
+            ]
+            for rank, domain, count in pending:
+                for _ in range(count):
+                    await receive(rank, domain)
+                    drain_messages += 1
+            drain_seconds = time.perf_counter() - drain_start
+
+        received_real_steps = received["real"]
+        received_sim_steps = received["sim"]
+        real_steps_after_recv = len(self._real_batch_buffer)
+        sim_steps_after_recv = len(self._sim_batch_buffer)
         train_real_steps = self._select_train_real_steps_from_buffers()
         assert train_real_steps is not None
         train_sim_steps = self._train_batch_steps - train_real_steps
         real_batches = self._pop_buffer_blocks(
-            self._real_batch_buffer, train_real_steps
+            self._real_batch_buffer,
+            train_real_steps,
+            latest=self._domain_buffer_mode == "latest",
         )
-        sim_batches = self._pop_buffer_blocks(self._sim_batch_buffer, train_sim_steps)
+        sim_batches = self._pop_buffer_blocks(
+            self._sim_batch_buffer,
+            train_sim_steps,
+            latest=self._domain_buffer_mode == "latest",
+        )
         self._co_training_buffer_metrics = {
             "buffer/real_rollouts_before_recv": float(real_steps_before_recv),
             "buffer/sim_rollouts_before_recv": float(sim_steps_before_recv),
@@ -1417,20 +1417,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "buffer/real_env_interaction_steps": float(
                 self._real_env_interaction_steps
             ),
-            "buffer/sim_env_interaction_steps": float(self._sim_env_interaction_steps),
-            "buffer/real_rollouts_after_recv": float(
-                real_steps_before_recv + received_real_steps
+            "buffer/sim_env_interaction_steps": float(
+                self._sim_env_interaction_steps
             ),
-            "buffer/sim_rollouts_after_recv": float(
-                sim_steps_before_recv + received_sim_steps
-            ),
+            "buffer/real_rollouts_after_recv": float(real_steps_after_recv),
+            "buffer/sim_rollouts_after_recv": float(sim_steps_after_recv),
             "buffer/real_steps_after_recv": float(
-                (real_steps_before_recv + received_real_steps)
-                * self._rollout_steps_per_trajectory
+                real_steps_after_recv * self._rollout_steps_per_trajectory
             ),
             "buffer/sim_steps_after_recv": float(
-                (sim_steps_before_recv + received_sim_steps)
-                * self._rollout_steps_per_trajectory
+                sim_steps_after_recv * self._rollout_steps_per_trajectory
             ),
             "buffer/train_real_rollouts": float(train_real_steps),
             "buffer/train_sim_rollouts": float(train_sim_steps),
@@ -1469,6 +1465,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 self._max_sim_buffer_steps * self._rollout_steps_per_trajectory
             ),
         }
+        if self._domain_buffer_mode == "latest":
+            self._co_training_buffer_metrics.update(
+                {
+                    "buffer/drain_messages": float(drain_messages),
+                    "buffer/drain_seconds": drain_seconds,
+                }
+            )
+            for domain, batches in (("real", real_batches), ("sim", sim_batches)):
+                self._co_training_buffer_metrics.update(
+                    {
+                        f"buffer/dropped_{domain}_rollouts": float(dropped[domain]),
+                        f"buffer/dropped_{domain}_rollouts_total": float(
+                            self._domain_buffer_dropped_rollouts[domain]
+                        ),
+                    }
+                )
+                versions = [
+                    batch["versions"].detach().reshape(-1).float()
+                    for batch in batches
+                    if batch.get("versions") is not None
+                ]
+                if versions:
+                    sampled_versions = torch.cat(versions)
+                    mean_version = sampled_versions.mean().item()
+                    self._co_training_buffer_metrics.update(
+                        {
+                            f"buffer/{domain}_version_mean": mean_version,
+                            f"buffer/{domain}_version_lag_mean": (
+                                self.version - mean_version
+                            ),
+                            f"buffer/{domain}_version_lag_max": (
+                                self.version - sampled_versions.min().item()
+                            ),
+                        }
+                    )
         return self._concat_rollout_batches_along_batch_dim(real_batches + sim_batches)
 
     def _domain_buffers_ready_for_train(self) -> bool:
@@ -1497,6 +1528,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def _next_receivable_domain_rank(
         self, input_channel: Channel
     ) -> tuple[int, str] | None:
+        if self._domain_buffer_mode == "latest":
+            return self._next_queued_domain_rank(input_channel, True, True)
         can_recv_real = (
             len(self._real_batch_buffer) + self._real_receive_steps
             <= self._max_real_buffer_steps
@@ -1642,8 +1675,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
     @staticmethod
     def _pop_buffer_blocks(
-        buffer: list[dict[str, torch.Tensor]], num_blocks: int
+        buffer: list[dict[str, torch.Tensor]], num_blocks: int, latest: bool = False
     ) -> list[dict[str, torch.Tensor]]:
+        if num_blocks < 0 or num_blocks > len(buffer):
+            raise ValueError("Requested block count must be between zero and buffer size.")
+        if num_blocks == 0:
+            return []
+        if latest:
+            blocks = buffer[-num_blocks:]
+            del buffer[-num_blocks:]
+            return blocks
         blocks = buffer[:num_blocks]
         del buffer[:num_blocks]
         return blocks
@@ -1655,18 +1696,32 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if len(batches) == 1:
             return batches[0]
 
+        common_keys = set(batches[0])
+        for batch in batches[1:]:
+            common_keys.intersection_update(batch)
+
         merged: dict[str, torch.Tensor] = {}
         for key, value in batches[0].items():
+            if key not in common_keys:
+                continue
             if isinstance(value, torch.Tensor):
-                tensors = [batch[key] for batch in batches if key in batch]
-                if tensors:
-                    merged[key] = torch.cat(tensors, dim=1)
-            elif isinstance(value, dict):
-                child_batches = [batch[key] for batch in batches if key in batch]
-                if child_batches:
-                    merged[key] = self._concat_rollout_batches_along_batch_dim(
-                        child_batches
+                tensors = [batch[key] for batch in batches]
+                if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+                    raise ValueError(
+                        f"Rollout field {key} has inconsistent value types across "
+                        "co-training domains."
                     )
+                merged[key] = torch.cat(tensors, dim=1)
+            elif isinstance(value, dict):
+                child_batches = [batch[key] for batch in batches]
+                if not all(isinstance(batch, dict) for batch in child_batches):
+                    raise ValueError(
+                        f"Rollout field {key} has inconsistent value types across "
+                        "co-training domains."
+                    )
+                merged[key] = self._concat_rollout_batches_along_batch_dim(
+                    child_batches
+                )
             else:
                 raise ValueError(f"Unsupported rollout batch value type for key {key}.")
         return merged
@@ -1806,9 +1861,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "values": self.rollout_batch.get("prev_values", None),
             "gamma": self.cfg.algorithm.get("gamma", 1),
             "gae_lambda": self.cfg.algorithm.get("gae_lambda", 1),
-            "normalize_advantages": self.cfg.algorithm.get(
-                "normalize_advantages", True
-            ),
             "group_size": self.cfg.algorithm.get("group_size", 8),
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": self.rollout_batch.get("loss_mask", None),
@@ -1930,9 +1982,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch["prev_logprobs"].shape[0]
             * self.rollout_batch["prev_logprobs"].shape[1]
         )
+        g = torch.Generator()
+        g.manual_seed(self.cfg.actor.seed + self._rank)
+        shuffle_id = torch.randperm(rollout_size, generator=g)
+
         with torch.no_grad():
             self.rollout_batch = process_nested_dict_for_train(
-                self.rollout_batch, torch.arange(rollout_size)
+                self.rollout_batch, shuffle_id
             )
 
         assert (
@@ -1956,21 +2012,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         )
         metrics = {}
         update_epoch = self.cfg.algorithm.get("update_epoch", 1)
-        target_kl = self.cfg.algorithm.get("target_kl", None)
-        stop_early = False
-        global_step = int(getattr(self, "version", 0))
-        for epoch in range(update_epoch):
-            epoch_indices = make_rollout_permutation(
-                rollout_size=rollout_size,
-                seed=int(self.cfg.actor.seed),
-                rank=int(self._rank),
-                global_step=global_step,
-                epoch=epoch,
-                update_epoch=int(update_epoch),
-            )
-            epoch_batch = index_flattened_batch(self.rollout_batch, epoch_indices)
+        for _ in range(update_epoch):
             rollout_dataloader_iter = split_dict_to_chunk(
-                epoch_batch,
+                self.rollout_batch,
                 rollout_size // batch_size_per_rank,
             )
             for train_global_batch in rollout_dataloader_iter:
@@ -1991,7 +2035,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
                 self.optimizer.zero_grad()
-                global_batch_kls = []
                 for idx, batch in enumerate(train_micro_batch):
                     batch = put_tensor_device(
                         batch,
@@ -2058,25 +2101,19 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "prev_values": prev_values,
                         "clip_ratio_high": self.cfg.algorithm.clip_ratio_high,
                         "clip_ratio_low": self.cfg.algorithm.clip_ratio_low,
-                        "clip_ratio_c": self.cfg.algorithm.get("clip_ratio_c", None),
                         "value_clip": self.cfg.algorithm.get("value_clip", None),
+                        "huber_delta": self.cfg.algorithm.get("huber_delta", None),
                         "value_loss_coef": self.cfg.algorithm.get(
                             "value_loss_coef", 1.0
                         ),
-                        "huber_delta": self.cfg.algorithm.get("huber_delta", None),
                         "loss_mask": loss_mask,
                         "loss_mask_sum": loss_mask_sum,
                         "max_episode_steps": self.cfg.env.train.max_episode_steps,
                         "task_type": self.cfg.runner.task_type,
-                        "critic_warmup": self.in_critic_warmup,
+                        "critic_warmup": self.optimizer_steps
+                        < self.critic_warmup_steps,
                     }
                     loss, metrics_data = policy_loss(**kwargs)
-                    approx_kl = metrics_data.get(
-                        "actor/proximal_approx_kl",
-                        metrics_data.get("actor/approx_kl", None),
-                    )
-                    if approx_kl is not None:
-                        global_batch_kls.append(float(approx_kl))
 
                     entropy_loss = torch.tensor(
                         0.0, device=Worker.torch_platform.current_device()
@@ -2092,7 +2129,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             action_dim=self.cfg.actor.model.get("action_dim", 7),
                             batch_size=output_dict["logprobs"].shape[0],
                         )
-                        entropy_loss = masked_mean(entropy, mask=loss_mask)
+                        entropy_mask = reshape_entropy_mask(
+                            loss_mask,
+                            entropy_type=self.cfg.algorithm.entropy_type,
+                            batch_size=output_dict["logprobs"].shape[0],
+                        )
+                        entropy_loss = masked_mean(entropy, mask=entropy_mask)
                         loss -= self.cfg.algorithm.entropy_bonus * entropy_loss
                     metrics_data["actor/entropy_loss"] = entropy_loss.detach().item()
 
@@ -2116,23 +2158,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 if len(lr_list) > 1:
                     data["critic/lr"] = lr_list[1]
                 append_to_dict(metrics, data)
-                if target_kl is not None and global_batch_kls:
-                    observed_kl = torch.tensor(
-                        np.mean(global_batch_kls),
-                        device=Worker.torch_platform.current_device(),
-                        dtype=torch.float32,
-                    )
-                    if torch.distributed.is_initialized():
-                        torch.distributed.all_reduce(
-                            observed_kl, op=torch.distributed.ReduceOp.SUM
-                        )
-                        observed_kl /= torch.distributed.get_world_size()
-                    if observed_kl.item() > float(target_kl):
-                        append_to_dict(metrics, {"actor/early_stop": 1.0})
-                        stop_early = True
-                        break
-            if stop_early:
-                break
         # put LR scheduler step here
         self.lr_scheduler.step()
         self.optimizer.zero_grad()

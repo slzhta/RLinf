@@ -23,16 +23,24 @@ from rlinf.config import SupportedModel
 from rlinf.utils.distributed import all_reduce_dict, masked_normalization
 from rlinf.utils.metric_utils import append_to_dict, compute_rollout_metrics
 from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
-from rlinf.utils.utils import clear_memory, masked_mean, reshape_entropy
+from rlinf.utils.utils import (
+    clear_memory,
+    masked_mean,
+    reshape_entropy,
+    reshape_entropy_mask,
+)
 from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
 
 
 def flatten_rollout_batch_for_train(
-    nested_dict: dict, shuffle_id: Optional[torch.Tensor]
+    nested_dict: dict,
+    shuffle_id: Optional[torch.Tensor],
+    key_path: str = "rollout_batch",
 ) -> dict:
     """Flatten [T, B, ...] rollout tensors to [T*B, ...] for actor training."""
     ret_dict = {}
     for key, value in nested_dict.items():
+        field_path = f"{key_path}.{key}"
         if key in ["dones", "terminations", "truncations", "prev_values"]:
             if isinstance(value, torch.Tensor):
                 value = value[:-1]
@@ -46,9 +54,18 @@ def flatten_rollout_batch_for_train(
 
         if isinstance(value, torch.Tensor):
             flat = value.reshape(-1, *value.shape[2:])
+            if shuffle_id is not None and flat.shape[0] != shuffle_id.numel():
+                raise ValueError(
+                    f"Rollout field {field_path} has {flat.shape[0]} flattened "
+                    f"samples, but the actor batch has {shuffle_id.numel()}. This "
+                    "usually means real and simulation rollouts contain different "
+                    "nested input fields."
+                )
             ret_dict[key] = flat[shuffle_id] if shuffle_id is not None else flat
         elif isinstance(value, dict):
-            ret_dict[key] = flatten_rollout_batch_for_train(value, shuffle_id)
+            ret_dict[key] = flatten_rollout_batch_for_train(
+                value, shuffle_id, key_path=field_path
+            )
         else:
             raise NotImplementedError(
                 f"Unsupported value type in rollout batch: key={key}, type={type(value)}"
@@ -77,6 +94,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": self.rollout_batch.get("loss_mask", None),
             "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+            "normalize_advantages": False,
         }
 
         adv_and_ret = calculate_adv_and_returns(**kwargs)
@@ -164,6 +182,19 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         generator = torch.Generator(device="cpu")
         generator.manual_seed(int(self.cfg.actor.seed) + int(self._rank))
         shuffle_id = torch.randperm(total_samples, generator=generator)
+
+        snapshot = None
+        if (
+            self.cfg.actor.get("debug_first_update", {}).get("enabled", False)
+            and not getattr(self, "_first_update_snapshot_saved", False)
+            and self.optimizer_steps == 0
+            and int(self.version) == 0
+        ):
+            from rlinf.utils.ppo_update_snapshot import FirstPPOUpdateSnapshot
+
+            snapshot = FirstPPOUpdateSnapshot(self, shuffle_id)
+            self._first_update_snapshot_saved = True
+            self.log_info(f"First PPO update snapshot: {snapshot.directory}")
 
         with torch.no_grad():
             self.rollout_batch = flatten_rollout_batch_for_train(
@@ -310,6 +341,9 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                         "clip_ratio_low": self.cfg.algorithm.clip_ratio_low,
                         "value_clip": self.cfg.algorithm.get("value_clip", None),
                         "huber_delta": self.cfg.algorithm.get("huber_delta", None),
+                        "value_loss_coef": self.cfg.algorithm.get(
+                            "value_loss_coef", 1.0
+                        ),
                         "loss_mask": loss_mask,
                         "loss_mask_sum": loss_mask_sum,
                         "max_episode_steps": self.cfg.env.train.max_episode_steps,
@@ -332,7 +366,12 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                             action_dim=self.cfg.actor.model.get("action_dim", 7),
                             batch_size=out["logprobs"].shape[0],
                         )
-                        entropy_loss = masked_mean(entropy, mask=loss_mask)
+                        entropy_mask = reshape_entropy_mask(
+                            loss_mask,
+                            entropy_type=self.cfg.algorithm.entropy_type,
+                            batch_size=out["logprobs"].shape[0],
+                        )
+                        entropy_loss = masked_mean(entropy, mask=entropy_mask)
                         loss = loss - self.cfg.algorithm.entropy_bonus * entropy_loss
 
                     loss = loss / self.gradient_accumulation
@@ -355,6 +394,8 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                 if len(lr_list) > 1:
                     extra_metrics["critic/lr"] = lr_list[1]
                 append_to_dict(metrics, extra_metrics)
+                if snapshot is not None:
+                    snapshot.save_step(self)
 
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
@@ -365,4 +406,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
             mean_metric_dict,
             op=torch.distributed.ReduceOp.AVG,
         )
+        if snapshot is not None:
+            snapshot.finish(self, metrics, mean_metric_dict)
+            self.log_info(f"First PPO update snapshot complete: {snapshot.directory}")
         return mean_metric_dict

@@ -48,7 +48,9 @@ class FrankaRobotConfig:
     camera_type: Optional[str] = None
     gripper_type: Optional[str] = None
     gripper_connection: Optional[str] = None
+    gripper_config: dict[str, float] = field(default_factory=dict)
     enable_camera_player: bool = True
+    output_image_size: int = 224
 
     is_dummy: bool = False
     use_dense_reward: bool = False
@@ -79,16 +81,20 @@ class FrankaRobotConfig:
     enable_random_reset: bool = False
 
     random_xy_range: float = 0.0
+    random_z_range: float = 0.0
     random_rz_range: float = 0.0  # np.pi / 6
 
     # Robot parameters
     # Same as the position arrays: first 3 are position limits, last 3 are orientation limits
     ee_pose_limit_min: np.ndarray = field(default_factory=lambda: np.zeros(6))
     ee_pose_limit_max: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    enable_safety_box: bool = True
     compliance_param: dict[str, float] = field(default_factory=dict)
     precision_param: dict[str, float] = field(default_factory=dict)
     binary_gripper_threshold: float = 0.5
     use_zero_one_gripper_action: bool = False
+    gripper_min_command_interval: float = 0.0
+    gripper_open_confirm_steps: int = 1
     enable_gripper_penalty: bool = True
     gripper_penalty: float = 0.1
     save_video_path: Optional[str] = None
@@ -102,12 +108,16 @@ class FrankaRobotConfig:
 
     def __post_init__(self):
         """Convert list fields from YAML/Hydra to numpy arrays."""
+        if self.output_image_size <= 0:
+            raise ValueError("output_image_size must be positive.")
         self.target_ee_pose = np.array(self.target_ee_pose)
         self.reset_ee_pose = np.array(self.reset_ee_pose)
         self.reward_threshold = np.array(self.reward_threshold)
         self.action_scale = np.array(self.action_scale)
         self.ee_pose_limit_min = np.array(self.ee_pose_limit_min)
         self.ee_pose_limit_max = np.array(self.ee_pose_limit_max)
+        if self.gripper_open_confirm_steps < 1:
+            raise ValueError("gripper_open_confirm_steps must be at least 1.")
 
 
 class FrankaEnv(gym.Env):
@@ -149,9 +159,11 @@ class FrankaEnv(gym.Env):
         next(self._joint_reset_cycle)  # Initialize the cycle
 
         self._success_hold_counter = 0  # Initialize the success hold counter
+        self._gripper_open_command_count = 0
         self._reward_worker = None
 
         self._target_pose = None  # Target pose for target-controller mode
+        self._last_gripper_command_time = float("-inf")
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -176,7 +188,7 @@ class FrankaEnv(gym.Env):
                     f"Waited {time.time() - start_time} seconds for Franka robot to be ready."
                 )
 
-        self._interpolate_move(self._reset_pose)
+        self._initialize_robot_pose()
         time.sleep(1.0)
         self._franka_state = self._controller.get_state().wait()[0]
 
@@ -188,6 +200,9 @@ class FrankaEnv(gym.Env):
     @property
     def task_description(self):
         return self._task_description
+
+    def _initialize_robot_pose(self):
+        self._interpolate_move(self._reset_pose)
 
     def _setup_hardware(self):
         from .franka_controller import FrankaController
@@ -230,6 +245,7 @@ class FrankaEnv(gym.Env):
             worker_rank=self.env_worker_rank,
             gripper_type=self.config.gripper_type or "franka",
             gripper_connection=self.config.gripper_connection,
+            gripper_config=self.config.gripper_config,
         )
 
     def _setup_reward_worker(self):
@@ -316,11 +332,11 @@ class FrankaEnv(gym.Env):
             is_gripper_action_effective = self._gripper_action(gripper_action)
 
             clipped_position = self._clip_position_to_safety_box(self.next_position)
-            
+
             if use_target:
                 self._target_pose = clipped_position.copy()
 
-            self._move_action(clipped_position)
+            self._execute_arm_motion(clipped_position, action)
         else:
             is_gripper_action_effective = True
 
@@ -490,6 +506,9 @@ class FrankaEnv(gym.Env):
             reset_pose[:2] += np.random.uniform(
                 -self.config.random_xy_range, self.config.random_xy_range, (2,)
             )
+            reset_pose[2] += np.random.uniform(
+                -self.config.random_z_range, self.config.random_z_range
+            )
             euler_random = self.config.target_ee_pose[3:].copy()
             euler_random[-1] += np.random.uniform(
                 -self.config.random_rz_range, self.config.random_rz_range
@@ -542,7 +561,14 @@ class FrankaEnv(gym.Env):
                 "frames": gym.spaces.Dict(
                     {
                         f"wrist_{k + 1}": gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
+                            0,
+                            255,
+                            shape=(
+                                self.config.output_image_size,
+                                self.config.output_image_size,
+                                3,
+                            ),
+                            dtype=np.uint8,
                         )
                         for k in range(len(self.config.camera_serials))
                     }
@@ -625,6 +651,9 @@ class FrankaEnv(gym.Env):
 
     def _clip_position_to_safety_box(self, position: np.ndarray) -> np.ndarray:
         """Clip the position array to be within the safety box."""
+        if not self.config.enable_safety_box:
+            return position
+
         position[:3] = np.clip(
             position[:3], self._xyz_safe_space.low, self._xyz_safe_space.high
         )
@@ -642,54 +671,108 @@ class FrankaEnv(gym.Env):
     def _clear_error(self):
         self._controller.clear_errors().wait()
 
-    def _gripper_action(self, position: float, is_binary: bool = True):
+    def _gripper_action(
+        self, position: float, is_binary: bool = True, force_command: bool = False
+    ):
+        threshold = float(self.config.binary_gripper_threshold)
+        command_allowed = (
+            position <= -threshold or position >= threshold
+            if not self.config.use_zero_one_gripper_action
+            else True
+        )
+        self._logger.info(
+            "Gripper diagnostic: "
+            f"command={position:.6f} "
+            f"open={self._franka_state.gripper_open} "
+            f"threshold={threshold:.3f} "
+            f"command_allowed={command_allowed} "
+            f"force_command={force_command} "
+            f"zero_one_mode={self.config.use_zero_one_gripper_action}"
+        )
         if is_binary:
+            now = time.monotonic()
+            command_allowed = (
+                now - self._last_gripper_command_time
+                >= self.config.gripper_min_command_interval
+            )
             if self.config.use_zero_one_gripper_action:
                 # If command is already in [0, 1], keep it. Otherwise treat it as
                 # legacy [-1, 1] and map to [0, 1] for incremental migration.
                 if 0.0 <= position <= 1.0:
                     command_zero_one = float(np.clip(position, 0.0, 1.0))
                 else:
-                    command_zero_one = float(0.5 * (np.clip(position, -1.0, 1.0) + 1.0))
+                    command_zero_one = float(
+                        0.5 * (np.clip(position, -1.0, 1.0) + 1.0)
+                    )
 
-                threshold = float(np.clip(self.config.binary_gripper_threshold, 0.0, 1.0))
+                threshold = float(
+                    np.clip(self.config.binary_gripper_threshold, 0.0, 1.0)
+                )
                 open_threshold = threshold
                 close_threshold = 1.0 - threshold
 
-                if command_zero_one <= close_threshold and self._franka_state.gripper_open:
+                if (
+                    command_zero_one <= close_threshold
+                    and (force_command or self._franka_state.gripper_open)
+                    and (force_command or command_allowed)
+                ):
+                    self._gripper_open_command_count = 0
                     self._controller.close_gripper().wait()
+                    self._last_gripper_command_time = now
                     time.sleep(0.6)
                     return True
                 elif (
                     command_zero_one >= open_threshold
-                    and not self._franka_state.gripper_open
+                    and (force_command or not self._franka_state.gripper_open)
+                    and (force_command or command_allowed)
                 ):
-                    self._controller.open_gripper().wait()
-                    time.sleep(0.6)
-                    return True
+                    return self._open_gripper_after_confirmation(force_command)
                 else:
+                    if command_zero_one < open_threshold:
+                        self._gripper_open_command_count = 0
                     return False
 
             if (
                 position <= -self.config.binary_gripper_threshold
-                and self._franka_state.gripper_open
+                and (force_command or self._franka_state.gripper_open)
+                and (force_command or command_allowed)
             ):
                 # Close gripper
+                self._gripper_open_command_count = 0
                 self._controller.close_gripper().wait()
+                self._last_gripper_command_time = now
                 time.sleep(0.6)
                 return True
             elif (
                 position >= self.config.binary_gripper_threshold
-                and not self._franka_state.gripper_open
+                and (force_command or not self._franka_state.gripper_open)
+                and (force_command or command_allowed)
             ):
                 # Open gripper
-                self._controller.open_gripper().wait()
-                time.sleep(0.6)
-                return True
+                return self._open_gripper_after_confirmation(force_command)
             else:  # No change
+                if position < self.config.binary_gripper_threshold:
+                    self._gripper_open_command_count = 0
                 return False
         else:
             raise NotImplementedError("Non-binary gripper action not implemented.")
+
+    def _open_gripper_after_confirmation(self, force_command: bool) -> bool:
+        """Open after consecutive policy requests, or immediately when forced."""
+        required = 1 if force_command else self.config.gripper_open_confirm_steps
+        self._gripper_open_command_count += 1
+        if self._gripper_open_command_count < required:
+            self._logger.info(
+                "Gripper open suppressed as a possible policy spike: "
+                f"confirmation={self._gripper_open_command_count}/{required}"
+            )
+            return False
+
+        self._gripper_open_command_count = 0
+        self._controller.open_gripper().wait()
+        self._last_gripper_command_time = time.monotonic()
+        time.sleep(0.6)
+        return True
 
     def _interpolate_move(self, pose: np.ndarray, timeout: float = 1.5):
         num_steps = int(timeout * self.config.step_frequency)
@@ -714,6 +797,11 @@ class FrankaEnv(gym.Env):
             self._controller.move_arm(position.astype(np.float32)).wait()
         else:
             print(f"Executing dummy action towards {position=}.")
+
+    def _execute_arm_motion(self, position: np.ndarray, action: np.ndarray) -> None:
+        """Execute the arm portion of one policy action."""
+        del action
+        self._move_action(position)
 
     def _get_observation(self) -> dict:
         if not self.config.is_dummy:

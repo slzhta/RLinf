@@ -56,14 +56,14 @@ from rlinf.models.embodiment.openpi.dataconfig.maniskill_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.metaworld_dataconfig import (
     LeRobotMetaworldDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.pnp_dataconfig import (
+    LeRobotPnPDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
     LeRobotRobocasaDataConfig,
 )
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
-)
-from rlinf.models.embodiment.openpi.dataconfig.pnp_dataconfig import (
-    LeRobotPnPDataConfig,
 )
 
 _CONFIGS = [
@@ -416,6 +416,29 @@ _CONFIGS = [
             ),
         ),
         pytorch_weight_path="/mnt/RLinf/lerobot_pi05_base",
+        seed=0,
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=500,
+    ),
+    TrainConfig(
+        name="pi05_pnp_center_crop_500_2k",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=True,
+        ),
+        data=LeRobotPnPDataConfig(
+            repo_id="pnp_center_crop_train_500_lerobot_v2",
+            default_prompt="pick up the cube and place it at the target position",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="/data/wangyinghan/pytorch_checkpoints/pi05_pnp_center_crop_500_2k",
+            ),
+        ),
+        pytorch_weight_path="/data/wangyinghan/pytorch_checkpoints/pi05_pnp_center_crop_500_2k",
         seed=0,
         batch_size=8,
         num_workers=4,

@@ -13,15 +13,16 @@
 # limitations under the License.
 
 import os
+import re
 
 from omegaconf import DictConfig, OmegaConf
 
 
 class _TensorboardLogger:
-    def __init__(self, log_path):
+    def __init__(self, log_path, purge_step: int | None = None):
         from torch.utils.tensorboard import SummaryWriter
 
-        self.writer = SummaryWriter(log_path)
+        self.writer = SummaryWriter(log_path, purge_step=purge_step)
 
     def log(self, data: dict[str, float], step: int) -> None:
         for key, value in data.items():
@@ -56,6 +57,9 @@ class MetricLogger:
 
         self.wandb_proxy = logger_cfg.get("wandb_proxy", None)
         self.swanlab_mode = logger_cfg.get("swanlab_mode", "cloud")
+        self.tensorboard_purge_step = self._get_tensorboard_purge_step(
+            cfg.runner.get("resume_dir", None)
+        )
         if len(self.logger_backends) > 0:
             assert all(
                 backend in self.supported_logger for backend in self.logger_backends
@@ -117,9 +121,19 @@ class MetricLogger:
             config_yaml_path = os.path.join(tensorboard_log_path, "config.yaml")
             OmegaConf.save(self.cfg, config_yaml_path, resolve=True)
 
-            logger["tensorboard"] = _TensorboardLogger(tensorboard_log_path)
+            logger["tensorboard"] = _TensorboardLogger(
+                tensorboard_log_path,
+                purge_step=self.tensorboard_purge_step,
+            )
         self._all_loggers.append(logger)
         return logger
+
+    @staticmethod
+    def _get_tensorboard_purge_step(resume_dir: str | None) -> int | None:
+        if not resume_dir:
+            return None
+        match = re.fullmatch(r"global_step_(\d+)", os.path.basename(str(resume_dir)))
+        return int(match.group(1)) + 1 if match else None
 
     def _get_scoped_logger(self, worker_group_name: str, rank: int) -> dict:
         key = (worker_group_name, int(rank))

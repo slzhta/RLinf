@@ -25,7 +25,7 @@ class FrankaCoTrainingBaseConfig(FrankaRobotConfig):
     clip_rz_range: float = np.pi / 5  # for bounding box
     clip_rp_range: float = np.pi / 6
     enable_random_reset: bool = True
-    enable_inner_safety_box : bool = False
+    enable_inner_safety_box: bool = True
 
     target_ee_pose: np.ndarray = field(default_factory=lambda: np.zeros(6))
     reward_threshold: np.ndarray = field(
@@ -154,7 +154,10 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
     def _clip_position_to_safety_box(self, pose):
         pose = super()._clip_position_to_safety_box(pose)
         # Clip xyz to inner box
-        if self.config.enable_inner_safety_box and self.inner_safety_box.contains(pose[:3]):
+        if (
+            self.config.enable_inner_safety_box
+            and self.inner_safety_box.contains(pose[:3])
+        ):
             pose[:3] = self.intersect_line_bbox(
                 self._franka_state.tcp_pose[:3],
                 pose[:3],
@@ -202,7 +205,6 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
             try:
                 rgb = camera.get_frame()
                 cropped_rgb = self._crop_frame(camera.name, rgb)
-
                 resized = cv2.resize(
                     cropped_rgb,
                     self.observation_space["frames"][camera.name].shape[:2][::-1],
@@ -242,7 +244,10 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
         Move to the rest position defined in base class.
         Add a small z offset before going to rest to avoid collision with object.
         """
-        self._gripper_action(1)
+        # The cached gripper flag can be stale across process/robot restarts. Reset
+        # must establish the physical state instead of skipping an open command
+        # merely because software already believes the gripper is open.
+        self._gripper_action(1, force_command=True)
         self._franka_state = self._controller.get_state().wait()[0]
         self._move_action(self._franka_state.tcp_pose)
         time.sleep(0.5)

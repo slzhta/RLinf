@@ -192,7 +192,7 @@ def reshape_entropy(
     """
     Reshape entropy based on the entropy type.If entropy is None, return None.
     If entropy_type is "action_level", reshape entropy to [batch_size, seq_len] by summing over action_dim.
-    If entropy_type is "chunk_level", reshape entropy to [batch_size, seq_len]
+    If entropy_type is "chunk_level", sum the entire action chunk to [batch_size].
 
     Args:
         entropy(Optional[torch.Tensor]): [B, seq_len * action_dim] or [B, seq_len] or None
@@ -206,8 +206,23 @@ def reshape_entropy(
         if entropy_type == "action_level":
             entropy = entropy.reshape(batch_size, -1, action_dim).sum(dim=-1)
         elif entropy_type == "chunk_level":
-            entropy = entropy.sum(dim=-1)
+            entropy = entropy.reshape(batch_size, -1, action_dim).sum(dim=(1, 2))
     return entropy
+
+
+def reshape_entropy_mask(
+    mask: Optional[torch.Tensor],
+    entropy_type: str,
+    batch_size: int = 1,
+) -> Optional[torch.Tensor]:
+    """Match a loss mask to the aggregation performed by ``reshape_entropy``."""
+    if mask is None:
+        return None
+    if entropy_type == "action_level":
+        return mask.reshape(batch_size, -1)
+    if entropy_type == "chunk_level":
+        return mask.reshape(batch_size, -1).any(dim=-1)
+    return mask
 
 
 def logprobs_from_logits_flash_attn(

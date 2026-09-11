@@ -1,3 +1,17 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import os
@@ -19,11 +33,10 @@ from sapien.physx import PhysxMaterial
 from rlinf.envs.maniskill.tasks.digital_twin.digital_twin_based_env import (
     DigitalTwinBaseEnv,
 )
-from rlinf.envs.maniskill.tasks.digital_twin.push_button import PushButtonEnv
 
 
 @register_env("PickAndPlaceDigitalTwin-v1", max_episode_steps=120)
-class PickAndPlaceDigitalTwinEnv(PushButtonEnv):
+class PickAndPlaceDigitalTwinEnv(DigitalTwinBaseEnv):
     """Digital-twin tabletop pick-and-place task with simple geometric objects."""
 
     CUBE_HALF_SIZE = 0.025
@@ -74,6 +87,8 @@ class PickAndPlaceDigitalTwinEnv(PushButtonEnv):
     )
     DEFAULT_TRAY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     DEFAULT_OBJECT_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    ROBOT_INITIAL_POSITION = np.array([-0.615, 0.0, 0.055], dtype=np.float32)
+    DEFAULT_RESET_RANDOM_RZ_RANGE = np.pi / 9
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -469,14 +484,6 @@ class PickAndPlaceDigitalTwinEnv(PushButtonEnv):
 
     def _get_tray_group_center_np(self) -> np.ndarray:
         group_center = self.task_alignment.get("tray_group_center", None)
-        if group_center is None and bool(
-            self.task_alignment.get("tray_group_center_from_target_ee_pose", False)
-        ):
-            group_center = self._button_pose_from_target_ee_pose()[:3]
-            group_center = np.asarray(group_center, dtype=np.float32)
-            group_center[2] = float(
-                self.task_alignment.get("tray_group_center_z", self.PLATE_DEPTH / 2.0)
-            )
         if group_center is None:
             group_center = self.DEFAULT_TRAY_GROUP_CENTER
 
@@ -617,12 +624,20 @@ class PickAndPlaceDigitalTwinEnv(PushButtonEnv):
 
     def _build_extracted_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
         extracted_obs = super()._build_extracted_obs(raw_obs)
-        qpos = self.agent.robot.get_qpos().to(torch.float32)
-        gripper_width = qpos[:, -2:].sum(dim=1, keepdim=True)
-        max_gripper_width = 2.0 * self.OPEN_GRIPPER_QPOS
-        gripper_open_state = (
-            2.0 * torch.clamp(gripper_width / max_gripper_width, min=0.0, max=1.0) - 1.0
-        )
+        gripper_controller = self.agent.controller.controllers.get("gripper")
+        if gripper_controller is None or not hasattr(
+            gripper_controller, "gripper_open_state"
+        ):
+            raise RuntimeError(
+                "PickAndPlaceDigitalTwinEnv requires the binary safe gripper "
+                "controller to build its 14-dimensional state."
+            )
+        binary_open_state = gripper_controller.gripper_open_state
+        gripper_open_state = torch.where(
+            binary_open_state,
+            torch.ones_like(binary_open_state, dtype=torch.float32),
+            -torch.ones_like(binary_open_state, dtype=torch.float32),
+        ).to(extracted_obs["states"].device)
         extracted_obs["states"] = torch.cat(
             [extracted_obs["states"], gripper_open_state], dim=1
         )
@@ -1099,6 +1114,14 @@ class PickAndPlaceDigitalTwinEnv(PushButtonEnv):
                 "[dx, dy, dz, droll, dpitch, dyaw, gripper]. "
                 f"Got action dim {action_dim}."
             )
+
+    def reset(self, seed=None, options=None):
+        raw_obs, infos = super().reset(seed=seed, options=options)
+        if isinstance(raw_obs, dict) and (
+            "sensor_data" in raw_obs or "image" in raw_obs
+        ):
+            infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, infos
 
     def step(self, action):
         self._validate_pick_action(action)

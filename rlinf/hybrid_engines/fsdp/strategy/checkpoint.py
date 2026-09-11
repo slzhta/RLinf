@@ -79,10 +79,11 @@ class Checkpoint(Stateful):
             out = {
                 "model": model_sd,
                 "optimizers": optim_sd,
-                "lr_schedulers": lr_sched_sd,
                 "fsdp_version": self.fsdp_version.value,
                 "rng": get_rng_state(),
             }
+            if lr_sched_sd:
+                out["lr_schedulers"] = lr_sched_sd
         else:
             model_sd, optim_sd = get_state_dict(
                 model=self.model,
@@ -95,10 +96,11 @@ class Checkpoint(Stateful):
             out = {
                 "model": model_sd,
                 "optimizers": optim_sd,
-                "lr_schedulers": lr_sched_sd,
                 "fsdp_version": self.fsdp_version.value,
                 "rng": get_rng_state(),
             }
+            if lr_sched_sd:
+                out["lr_schedulers"] = lr_sched_sd
         return out
 
     def load_state_dict(self, state):

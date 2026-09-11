@@ -23,8 +23,6 @@ from rlinf.utils.logging import get_logger
 
 
 class KeyEventSource(Protocol):
-    """Minimal keyboard interface used by human-feedback wrappers."""
-
     def get_key(self) -> str | None: ...
 
 
@@ -116,12 +114,7 @@ class KeyboardRewardDoneMultiStageWrapper(BaseKeyboardRewardDoneWrapper):
 
 
 class HumanPnPRewardDoneWrapper(gym.Wrapper):
-    """Provide terminal-only human rewards and manual reset for real PnP.
-
-    Feedback keys are ``S`` for success, ``F`` for unrecoverable failure,
-    ``X`` for an administrative or safety abort, and ``R`` when the workspace
-    is ready for the next episode. Key matching is case-insensitive.
-    """
+    """Provide terminal-only human rewards and manual reset for real PnP."""
 
     def __init__(
         self,
@@ -137,8 +130,10 @@ class HumanPnPRewardDoneWrapper(gym.Wrapper):
         reset_ready_timeout: float | None = None,
     ):
         super().__init__(env)
-        keys = [success_key, failure_key, abort_key, ready_key]
-        normalized_keys = [key.lower() for key in keys]
+        normalized_keys = [
+            key.lower()
+            for key in (success_key, failure_key, abort_key, ready_key)
+        ]
         if any(len(key) != 1 for key in normalized_keys):
             raise ValueError("Human feedback keys must be single characters.")
         if len(set(normalized_keys)) != len(normalized_keys):
@@ -248,26 +243,41 @@ class HumanPnPRewardDoneWrapper(gym.Wrapper):
         reward = 0.0
         feedback = None
         should_train = True
+        timed_out = False
+        human_feedback_received = False
 
         key = self._get_key_event()
         if not self._terminal_feedback_received:
-            if key == self.success_key:
+            if info.get("safety_collision_failure", False):
+                feedback = "collision_failure"
+                terminated = True
+                truncated = False
+            elif key == self.success_key:
                 feedback = "success"
                 reward = 1.0
                 terminated = True
+                human_feedback_received = True
             elif key == self.failure_key:
                 feedback = "failure"
                 terminated = True
+                human_feedback_received = True
             elif key == self.abort_key:
                 feedback = "abort"
                 truncated = True
                 should_train = False
+                human_feedback_received = True
+
+        if feedback is None and truncated:
+            feedback = "timeout_failure"
+            terminated = True
+            truncated = False
+            timed_out = True
 
         if feedback is not None:
             self._terminal_feedback_received = True
             feedback_at = time.time()
             self._logger.info(
-                "PnP human feedback accepted: episode=%d step=%d feedback=%s",
+                "PnP episode ended: episode=%d step=%d feedback=%s",
                 self._episode_id,
                 self._step_id,
                 feedback,
@@ -277,8 +287,13 @@ class HumanPnPRewardDoneWrapper(gym.Wrapper):
 
         info.update(
             {
+                "success": feedback == "success",
+                "fail": feedback
+                in {"failure", "timeout_failure", "collision_failure"},
+                "collision_failure": feedback == "collision_failure",
                 "human_feedback": feedback or "none",
-                "human_feedback_received": feedback is not None,
+                "human_feedback_received": human_feedback_received,
+                "timeout_failure": timed_out,
                 "human_feedback_episode_id": self._episode_id,
                 "human_feedback_step_id": self._step_id,
                 "human_feedback_timestamp": feedback_at,

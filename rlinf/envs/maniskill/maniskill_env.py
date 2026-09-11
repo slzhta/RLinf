@@ -270,9 +270,6 @@ class ManiskillEnv(gym.Env):
         if "fail" in infos:
             self.fail_once = self.fail_once | infos["fail"]
             episode_info["fail_once"] = self.fail_once.clone()
-        episode_info["return"] = self.returns.clone()
-        episode_info["episode_len"] = self.elapsed_steps.clone()
-        episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
         for key, value in infos.items():
             if (
                 key.endswith("_once")
@@ -281,6 +278,9 @@ class ManiskillEnv(gym.Env):
                 and value.shape == self.success_once.shape
             ):
                 episode_info[key] = value.clone()
+        episode_info["return"] = self.returns.clone()
+        episode_info["episode_len"] = self.elapsed_steps.clone()
+        episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
         infos["episode"] = episode_info
         return infos
 

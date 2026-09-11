@@ -1,15 +1,25 @@
-# TODO(liangzhi): The import logit may be change, and the path should be change
-import os.path as osp
-from pathlib import Path
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import numpy as np
 import sapien
 import torch
-from transforms3d.euler import euler2quat
-
 from mani_skill.utils.building.ground import build_ground
 from mani_skill.utils.scene_builder import SceneBuilder
+from transforms3d.euler import euler2quat
 
+from rlinf.envs.maniskill.tasks.digital_twin import DIGITAL_TWIN_ASSET_DIR
 
 TABLE_SCALE = 1.0
 TABLE_VISUAL_ROTATION = sapien.Pose(q=euler2quat(0, 0, np.pi / 2))
@@ -28,8 +38,7 @@ class TableSceneBuilder(SceneBuilder):
 
     def build(self):
         builder = self.scene.create_actor_builder()
-        model_dir = Path(osp.dirname(__file__)).resolve().parent / "assets" / "tables"
-        table_model_file = str(model_dir / "table.glb")
+        table_model_file = str(DIGITAL_TWIN_ASSET_DIR / "tables" / "table.glb")
         builder.add_box_collision(
             pose=sapien.Pose(p=[0, 0, float(TABLE_COLLISION_SIZE[2] / 2)]),
             half_size=tuple((TABLE_COLLISION_SIZE / 2).tolist()),

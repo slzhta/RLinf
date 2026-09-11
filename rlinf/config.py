@@ -58,6 +58,7 @@ class SupportedModel(Enum):
     DEXBOTIC_PI = ("dexbotic_pi", "embodied")
     DREAMZERO = ("dreamzero", "embodied")
     CNN_POLICY = ("cnn_policy", "embodied")
+    RESIDUAL_POLICY = ("residual_policy", "embodied")
     FLOW_POLICY = ("flow_policy", "embodied")
     CMA_POLICY = ("cma", "embodied")
     LINGBOTVLA = ("lingbotvla", "embodied")
@@ -747,6 +748,12 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def validate_embodied_cfg(cfg):
+    if get_supported_model(cfg.actor.model.model_type) == SupportedModel.RESIDUAL_POLICY:
+        from rlinf.models.embodiment.residual_policy.validation import (
+            validate_residual_cfg,
+        )
+
+        validate_residual_cfg(cfg)
     assert get_supported_model(cfg.actor.model.model_type).category == "embodied", (
         f"Model type: '{cfg.actor.model.model_type}' is not an embodied model. "
         f"Supported embodied models: {[e.value for e in SupportedModel if e.category == 'embodied']}."

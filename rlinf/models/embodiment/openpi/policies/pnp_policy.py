@@ -36,7 +36,18 @@ class PnPInputs(transforms.DataTransformFn):
             raise ValueError(f"expected state dim {self.state_dim}, got {state.shape}")
 
         base_image = _parse_image(data["observation/image"])
-        wrist_image = _parse_image(data["observation/wrist_image"])
+        wrist_image_key = (
+            "observation/wrist_image"
+            if "observation/wrist_image" in data
+            else "observation/extra_view_image"
+        )
+        if wrist_image_key not in data:
+            raise KeyError(
+                "Missing wrist camera observation; expected "
+                "observation/wrist_image or observation/extra_view_image; "
+                f"available keys: {sorted(data.keys())}"
+            )
+        wrist_image = _parse_image(data[wrist_image_key])
         if base_image.shape != wrist_image.shape:
             raise ValueError(
                 f"base/wrist image shapes differ: {base_image.shape}, {wrist_image.shape}"

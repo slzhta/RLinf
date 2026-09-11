@@ -1,22 +1,17 @@
 env_type: maniskill
-
 total_num_envs: null
-
 auto_reset: true
 ignore_terminations: false
 use_rel_reward: false
 seed: 0
 group_size: 1
-# This continuous task has no finite episode-state catalogue. Full resets are
-# reproducible through `seed`; episode IDs would not fix task randomization.
 use_fixed_reset_state_ids: false
 max_steps_per_rollout_epoch: 120
 max_episode_steps: 120
 reward_mode: raw
 wrap_obs_mode: raw
-include_states_in_obs: true
+include_states_in_obs: false
 use_config_control_mode: true
-
 enable_offload: false
 
 video_cfg:
@@ -27,18 +22,19 @@ video_cfg:
 init_params:
   id: PickAndPlaceDigitalTwin-v1
   num_envs: null
-  obs_mode: "rgb+segmentation"
+  obs_mode: rgb+segmentation
   control_mode: pd_ee_body_target_delta_pose_real
-  sim_backend: "gpu"
+  sim_backend: gpu
   sim_config:
     sim_freq: 500
-    control_freq: 5
+    control_freq: 10
   max_episode_steps: ${env.train.max_episode_steps}
   sensor_configs:
-    shader_pack: "default"
+    shader_pack: default
   render_mode: rgb_array
   reward_mode: dense
-
+  use_hand_camera: false
+  synchronize_render: false
   domain_randomization:
     enabled: false
     randomize_lighting: false
@@ -52,8 +48,7 @@ init_params:
     joint_damping_scale_range: [0.7, 1.3]
     joint_force_limit_scale_range: [0.8, 1.2]
     joint_friction_abs_range: [0.0, 0.3]
-    joint_drive_mode_choices: ["force", "acceleration"]
-
+    joint_drive_mode_choices: [force, acceleration]
   controller_alignment:
     use_target_controller: true
     use_zero_one_gripper_action: false
@@ -72,22 +67,20 @@ init_params:
     enable_random_reset: true
     reset_position_random_range: [0.015, 0.015, 0.01]
     random_rz_range: 0.35
-
   task_alignment:
     tray_group_center: [-0.06984352, 0.03448609, 0.0075]
     tray_center_spacing: 0.18
     tray_random_xy_range: 0.0
-    # Sample the full collision-safe tray interior to cover the deployment task.
     object_random_in_source_tray: true
     object_random_yaw_range: 3.1415927
     object_tray_margin: 0.005
     use_dense_reward: false
     reward_scale: 1.0
-    sparse_grasp_reward: 0.1
-    sparse_lift_reward: 0.2
-    sparse_place_reward: 0.3
+    sparse_grasp_reward: 0.0
+    sparse_lift_reward: 0.0
+    sparse_place_reward: 0.0
     sparse_success_reward: 1.0
-    sparse_drop_penalty: -0.2
+    sparse_drop_penalty: 0.0
     success_stability_steps: 3
     success_max_linear_speed: 0.05
     success_max_angular_speed: 0.5

@@ -160,7 +160,7 @@ class EnvWorker(Worker):
                 for _ in range(self.stage_num)
             ]
         if self.enable_eval:
-            self.eval_finished: list[torch.Tensor] = [
+            self.eval_prev_done: list[torch.Tensor] = [
                 torch.zeros(self.eval_num_envs_per_stage, dtype=torch.bool)
                 for _ in range(self.stage_num)
             ]
@@ -274,9 +274,6 @@ class EnvWorker(Worker):
             return
 
         if env_cfg.env_type == "maniskill":
-            translated_controller_cfg = self._translate_alignment_for_maniskill(
-                controller_cfg
-            )
             init_params = OmegaConf.to_container(
                 env_cfg.get("init_params", OmegaConf.create({})),
                 resolve=True,
@@ -284,7 +281,10 @@ class EnvWorker(Worker):
             existing_controller_cfg = init_params.get("controller_alignment", {})
             merged_controller_cfg = update_nested_cfg({}, existing_controller_cfg)
             merged_controller_cfg = update_nested_cfg(
-                merged_controller_cfg, translated_controller_cfg
+                merged_controller_cfg, controller_cfg
+            )
+            merged_controller_cfg = self._translate_alignment_for_maniskill(
+                merged_controller_cfg
             )
             init_params["controller_alignment"] = merged_controller_cfg
             setattr(env_cfg, "init_params", OmegaConf.create(init_params))
@@ -341,6 +341,11 @@ class EnvWorker(Worker):
         self, controller_cfg: dict[str, Any]
     ) -> dict[str, Any]:
         translated_cfg = copy.deepcopy(controller_cfg)
+
+        if not bool(translated_cfg.get("enable_safety_box", True)):
+            translated_cfg.pop("ee_pose_limit_min", None)
+            translated_cfg.pop("ee_pose_limit_max", None)
+            return translated_cfg
 
         target_ee_pose = translated_cfg.get("target_ee_pose", None)
         clip_x_range = translated_cfg.get("clip_x_range", None)
@@ -699,14 +704,13 @@ class EnvWorker(Worker):
             infos["intervene_action"] if "intervene_action" in infos else None
         )
         intervene_flags = infos["intervene_flag"] if "intervene_flag" in infos else None
-        abort_flags = infos.get(
-            "abort_flags", torch.zeros_like(chunk_dones, dtype=torch.bool)
-        )
+        abort_flags = infos.get("abort_flags", torch.zeros_like(chunk_dones))
         if self.cfg.env.train.auto_reset and chunk_dones.any():
-            if "intervene_action" in infos["final_info"]:
-                intervene_actions = infos["final_info"]["intervene_action"]
-                intervene_flags = infos["final_info"]["intervene_flag"]
-            abort_flags = infos["final_info"].get("abort_flags", abort_flags)
+            final_info = infos.get("final_info", {})
+            if "intervene_action" in final_info:
+                intervene_actions = final_info["intervene_action"]
+                intervene_flags = final_info["intervene_flag"]
+            abort_flags = final_info.get("abort_flags", abort_flags)
 
         env_output = EnvOutput(
             obs=extracted_obs,
@@ -736,15 +740,6 @@ class EnvWorker(Worker):
             policy=self.cfg.actor.model.get("policy_setup", None),
             wm_env_type=self.cfg.env.eval.get("wm_env_type", None),
         )
-        finished = self.eval_finished[stage_id]
-        track_first_episode = not self.cfg.env.eval.get("auto_reset", True)
-        if track_first_episode and finished.any():
-            if isinstance(chunk_actions, torch.Tensor):
-                chunk_actions = chunk_actions.clone()
-                chunk_actions[finished.to(chunk_actions.device)] = 0
-            else:
-                chunk_actions = np.array(chunk_actions, copy=True)
-                chunk_actions[finished.cpu().numpy()] = 0
         env_info = {}
 
         obs_list, _, chunk_terminations, chunk_truncations, infos_list = (
@@ -764,11 +759,9 @@ class EnvWorker(Worker):
         )
 
         current_dones = chunk_dones[:, -1]  # [num_envs] bool
-        finished = finished.to(current_dones.device)
-        newly_done = current_dones & (~finished)
-        self.eval_finished[stage_id] = (
-            finished | current_dones if track_first_episode else current_dones.clone()
-        )
+        prev = self.eval_prev_done[stage_id]
+        newly_done = current_dones & ~prev.to(current_dones.device)
+        self.eval_prev_done[stage_id] = current_dones.clone()
 
         if newly_done.any():
             if "final_info" in infos:
@@ -949,6 +942,10 @@ class EnvWorker(Worker):
             )
 
         adjusted_rewards = rewards.clone()
+        bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
+        if bootstrap_type == "none":
+            return adjusted_rewards
+
         if (
             bootstrap_values is None
             or not self.cfg.env.train.auto_reset
@@ -956,11 +953,14 @@ class EnvWorker(Worker):
         ):
             return adjusted_rewards
 
-        bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
         if bootstrap_type == "standard":
             last_step_truncations = env_output.truncations[:, -1]
-        else:
+        elif bootstrap_type == "always":
             last_step_truncations = env_output.dones[:, -1]
+        else:
+            raise ValueError(
+                f"Unsupported algorithm.bootstrap_type={bootstrap_type!r}."
+            )
 
         if not last_step_truncations.any():
             return adjusted_rewards
@@ -1164,7 +1164,7 @@ class EnvWorker(Worker):
                     else None,
                     intervene_actions=None,
                     intervene_flags=None,
-                    abort_flags=torch.zeros_like(dones, dtype=torch.bool),
+                    abort_flags=torch.zeros_like(dones),
                 )
                 env_outputs.append(env_output)
         else:
@@ -1181,7 +1181,7 @@ class EnvWorker(Worker):
                     truncations=truncations,
                     intervene_actions=self.last_intervened_info_list[stage_id][0],
                     intervene_flags=self.last_intervened_info_list[stage_id][1],
-                    abort_flags=torch.zeros_like(dones, dtype=torch.bool),
+                    abort_flags=torch.zeros_like(dones),
                 )
                 env_outputs.append(env_output)
 
@@ -1429,12 +1429,10 @@ class EnvWorker(Worker):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):
                     self.eval_env_list[stage_id].is_start = True
-                    self.eval_finished[stage_id] = torch.zeros(
+                    self.eval_prev_done[stage_id] = torch.zeros(
                         self.eval_num_envs_per_stage, dtype=torch.bool
                     )
-                    extracted_obs, infos = self._reset_eval_env(
-                        stage_id, eval_rollout_epoch
-                    )
+                    extracted_obs, infos = self.eval_env_list[stage_id].reset()
                     env_output = EnvOutput(
                         obs=extracted_obs,
                         final_obs=infos["final_observation"]
@@ -1494,25 +1492,6 @@ class EnvWorker(Worker):
             eval_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
         return self._add_domain_metrics(eval_metrics, mode="eval")
-
-    def _reset_eval_env(self, stage_id: int, eval_rollout_epoch: int):
-        """Reset an eval batch with deterministic, non-overlapping ManiSkill seeds."""
-        eval_cfg = self.cfg.env.eval
-        reset_kwargs = {}
-        if (
-            not eval_cfg.auto_reset
-            and eval_cfg.env_type == "maniskill"
-            and not eval_cfg.use_fixed_reset_state_ids
-        ):
-            batch_index = (
-                eval_rollout_epoch * self._world_size * self.stage_num
-                + self._rank * self.stage_num
-                + stage_id
-            )
-            reset_kwargs["seed"] = (
-                int(eval_cfg.seed) + batch_index * self.eval_num_envs_per_stage
-            )
-        return self.eval_env_list[stage_id].reset(**reset_kwargs)
 
     def get_actor_split_num(self):
         send_num = self._component_placement.get_world_size("env") * self.stage_num

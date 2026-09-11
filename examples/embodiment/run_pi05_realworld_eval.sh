@@ -45,8 +45,6 @@ CMD=(
     --config-name
     "${CONFIG_NAME}"
     "runner.logger.log_path=${LOG_DIR}"
-    "env.train.keyboard_reward_wrapper=null"
-    "env.eval.keyboard_reward_wrapper=null"
     "${EXTRA_ARGS[@]}"
 )
 

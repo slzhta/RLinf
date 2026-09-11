@@ -109,13 +109,17 @@ class EnvOutput:
             else None
         )
 
-        return {
+        prepared_obs = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        for key in ("base_actions", "base_action_mask"):
+            if key in obs:
+                prepared_obs[key] = obs[key]
+        return prepared_obs
 
     @staticmethod
     def merge_env_outputs(env_outputs: list[dict]) -> dict[str, Any]:
@@ -479,6 +483,7 @@ class Trajectory:
             prev_logprobs = apply_mask(self.prev_logprobs, i)
             prev_values = apply_mask(self.prev_values, i)
             intervene_flags = apply_mask(self.intervene_flags, i)
+            abort_flags = apply_mask(self.abort_flags, i)
 
             forward_inputs = apply_mask_to_dict(self.forward_inputs, i)
             curr_obs = apply_mask_to_dict(self.curr_obs, i)
@@ -499,6 +504,7 @@ class Trajectory:
                     model_weights_id=self.model_weights_id,
                     actions=actions,
                     intervene_flags=intervene_flags,
+                    abort_flags=abort_flags,
                     rewards=rewards,
                     terminations=terminations,
                     truncations=truncations,
@@ -527,9 +533,7 @@ class EmbodiedRolloutResult:
     intervene_flags: list[torch.Tensor] = field(
         default_factory=list
     )  # trajectory_length
-    abort_flags: list[torch.Tensor] = field(
-        default_factory=list
-    )  # trajectory_length + rollout_epoch
+    abort_flags: list[torch.Tensor] = field(default_factory=list)
     rewards: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     terminations: list[torch.Tensor] = field(
         default_factory=list

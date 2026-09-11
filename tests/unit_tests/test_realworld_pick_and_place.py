@@ -1,238 +1,329 @@
-from collections import deque
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
-import torch
 
-from rlinf.envs.realworld.common.wrappers.euler_obs import Quat2EulerWrapper
 from rlinf.envs.realworld.common.wrappers.reward_done_wrapper import (
     HumanPnPRewardDoneWrapper,
 )
+from rlinf.envs.realworld.franka.tasks.co_training_base_env import (
+    FrankaCoTrainingBaseEnv,
+)
 from rlinf.envs.realworld.franka.tasks.pick_and_place_env import (
+    FrankaPickAndPlaceConfig,
     FrankaPickAndPlaceEnv,
 )
-from rlinf.envs.realworld.realworld_env import RealWorldEnv
-from rlinf.envs.wrappers.record_video import RecordVideo
-from rlinf.utils.metric_utils import compute_abort_loss_mask
 
 
-class _FakePnPEnv(gym.Env):
-    action_space = gym.spaces.Box(-1.0, 1.0, shape=(7,), dtype=np.float32)
-    observation_space = gym.spaces.Dict(
-        {"marker": gym.spaces.Box(0.0, 10.0, shape=(1,), dtype=np.float32)}
-    )
-
-    def __init__(self, *, terminated: bool = False, truncated: bool = False):
-        self.terminated = terminated
-        self.truncated = truncated
-        self.refresh_count = 0
-
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        return {"marker": np.array([0.0], dtype=np.float32)}, {}
-
-    def step(self, action):
-        return (
-            {"marker": np.array([1.0], dtype=np.float32)},
-            0.75,
-            self.terminated,
-            self.truncated,
-            {},
-        )
-
-    def refresh_observation(self):
-        self.refresh_count += 1
-        return {"marker": np.array([2.0], dtype=np.float32)}
-
-
-class _EventListener:
-    def __init__(self, *events: str):
-        self.events = deque(events)
+class _EventSource:
+    def __init__(self):
+        self.events = []
 
     def get_key(self):
         return None
 
     def get_key_event(self):
-        return self.events.popleft() if self.events else None
+        return self.events.pop(0) if self.events else None
 
     def clear_key_events(self):
-        pass
+        self.events.clear()
 
 
-class _HeldKeyListener:
-    def __init__(self, key: str):
-        self.key = key
+class _FeedbackEnv(gym.Env):
+    def __init__(self):
+        self.next_truncated = False
+        self.next_info = {}
 
-    def get_key(self):
-        return self.key
+    def reset(self, *, seed=None, options=None):
+        return {"observation": 0}, {}
+
+    def step(self, action):
+        return (
+            {"observation": action},
+            123.0,
+            False,
+            self.next_truncated,
+            self.next_info,
+        )
 
 
-def _step_with_feedback(feedback_key: str, **env_kwargs):
+def _make_feedback_wrapper():
+    listener = _EventSource()
     wrapper = HumanPnPRewardDoneWrapper(
-        _FakePnPEnv(**env_kwargs),
-        listener=_EventListener(feedback_key),
-        wait_for_reset_ready=False,
+        _FeedbackEnv(), listener=listener, wait_for_reset_ready=False
     )
-    return wrapper.step(np.zeros(7, dtype=np.float32))
+    wrapper.reset()
+    return wrapper, listener
 
 
-def test_human_pnp_terminal_feedback_semantics():
-    _, reward, terminated, truncated, info = _step_with_feedback("s")
+def test_human_success_is_a_trainable_terminal_reward():
+    wrapper, listener = _make_feedback_wrapper()
+    listener.events.append("s")
+    _, reward, terminated, truncated, info = wrapper.step(0)
+
     assert reward == 1.0
-    assert terminated
-    assert not truncated
-    assert info["human_feedback"] == "success"
-    assert info["human_feedback_should_train"]
+    assert terminated and not truncated
+    assert info["success"]
+    assert not info["discard_trajectory"]
 
-    _, reward, terminated, truncated, info = _step_with_feedback("f")
-    assert reward == 0.0
-    assert terminated
-    assert not truncated
-    assert info["human_feedback"] == "failure"
-    assert info["human_feedback_should_train"]
 
-    _, reward, terminated, truncated, info = _step_with_feedback("x")
+def test_human_abort_is_discarded_without_becoming_failure():
+    wrapper, listener = _make_feedback_wrapper()
+    listener.events.append("x")
+    _, reward, terminated, truncated, info = wrapper.step(0)
+
     assert reward == 0.0
-    assert not terminated
-    assert truncated
-    assert info["human_feedback"] == "abort"
+    assert not terminated and truncated
+    assert not info["fail"]
     assert info["discard_trajectory"]
 
 
-def test_human_pnp_wrapper_preserves_hardware_termination():
-    _, reward, terminated, truncated, _ = _step_with_feedback(
-        "unmapped", terminated=True, truncated=True
+def test_timeout_and_collision_are_trainable_failures():
+    wrapper, _ = _make_feedback_wrapper()
+    wrapper.env.next_truncated = True
+    _, _, terminated, truncated, info = wrapper.step(0)
+    assert terminated and not truncated
+    assert info["timeout_failure"] and info["fail"]
+    assert not info["discard_trajectory"]
+
+    wrapper, _ = _make_feedback_wrapper()
+    wrapper.env.next_info = {"safety_collision_failure": True}
+    _, _, terminated, truncated, info = wrapper.step(0)
+    assert terminated and not truncated
+    assert info["collision_failure"] and info["fail"]
+    assert not info["discard_trajectory"]
+
+
+def test_contact_detection_is_opt_in_and_ignores_closed_gripper():
+    env = FrankaPickAndPlaceEnv.__new__(FrankaPickAndPlaceEnv)
+    env.config = SimpleNamespace(
+        enable_downward_contact_failure=True,
+        contact_downward_action_threshold=0.05,
+        contact_force_threshold=10.0,
     )
+    env._franka_state = SimpleNamespace(gripper_open=False)
+    downward_action = np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0])
+
+    assert not env._is_downward_contact(downward_action, 20.0)
+    env._franka_state.gripper_open = True
+    assert env._is_downward_contact(downward_action, 20.0)
+    env.config.enable_downward_contact_failure = False
+    assert not env._is_downward_contact(downward_action, 20.0)
+
+
+def test_downward_contact_retreat_is_terminal_but_not_discarded(monkeypatch):
+    env = object.__new__(FrankaPickAndPlaceEnv)
+    env.config = FrankaPickAndPlaceConfig(
+        camera_serials=["dummy"],
+        is_dummy=True,
+        enable_downward_contact_failure=True,
+        contact_force_threshold=10.0,
+        contact_downward_action_threshold=0.05,
+        contact_retreat_distance=0.05,
+        contact_retreat_timeout=0.5,
+    )
+    env._contact_force_baseline = np.zeros(3)
+    env._franka_state = SimpleNamespace(
+        tcp_force=np.array([0.0, 0.0, 12.0]),
+        tcp_pose=np.array([0.5, 0.1, 0.05, 0.0, 0.0, 0.0, 1.0]),
+        gripper_open=True,
+    )
+    env._target_pose = np.array([0.5, 0.1, 0.0, 0.0, 0.0, 0.0, 1.0])
+    env._logger = type(
+        "Logger", (), {"warning": staticmethod(lambda *args, **kwargs: None)}
+    )()
+    sent_poses = []
+
+    def fake_base_step(self, action):
+        return {"state": "before_retreat"}, 0.0, False, False, {}
+
+    def fake_move_action(pose):
+        sent_poses.append(np.asarray(pose).copy())
+
+    def fake_interpolate_move(pose, timeout):
+        assert timeout == 0.5
+        env._franka_state.tcp_pose = np.asarray(pose).copy()
+
+    monkeypatch.setattr(FrankaCoTrainingBaseEnv, "step", fake_base_step)
+    monkeypatch.setattr(env, "_move_action", fake_move_action)
+    monkeypatch.setattr(env, "_interpolate_move", fake_interpolate_move)
+    monkeypatch.setattr(env, "_clip_position_to_safety_box", lambda pose: pose)
+    monkeypatch.setattr(env, "_get_observation", lambda: {"state": "retreated"})
+
+    obs, reward, terminated, truncated, info = env.step(
+        np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0])
+    )
+
+    assert obs == {"state": "retreated"}
     assert reward == 0.0
-    assert terminated
-    assert truncated
+    assert terminated and not truncated
+    assert info["safety_collision_failure"]
+    assert not info["discard_trajectory"]
+    assert np.allclose(sent_poses[0], [0.5, 0.1, 0.05, 0.0, 0.0, 0.0, 1.0])
+    assert np.isclose(env._target_pose[2], 0.10)
 
 
-def test_human_pnp_reset_waits_for_ready_and_refreshes_observation():
-    env = _FakePnPEnv()
-    wrapper = HumanPnPRewardDoneWrapper(
-        env,
-        listener=_EventListener("r"),
-        reset_poll_interval=0.001,
+def test_pnp_downward_motion_uses_single_base_target(monkeypatch):
+    env = object.__new__(FrankaPickAndPlaceEnv)
+    sent_poses = []
+    monkeypatch.setattr(
+        env, "_move_action", lambda pose: sent_poses.append(pose.copy())
     )
 
-    observation, info = wrapper.reset()
+    target = np.array([0.5, 0.1, 0.04, 0.0, 0.0, 0.0, 1.0])
+    action = np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0])
+    env._execute_arm_motion(target, action)
 
-    np.testing.assert_array_equal(observation["marker"], np.array([2.0]))
-    assert env.refresh_count == 1
-    assert info["human_reset_ready"]
+    assert len(sent_poses) == 1
+    assert np.array_equal(sent_poses[0], target)
 
 
-def test_human_pnp_debounces_a_held_feedback_key_across_reset():
-    wrapper = HumanPnPRewardDoneWrapper(
-        _FakePnPEnv(),
-        listener=_HeldKeyListener("s"),
-        wait_for_reset_ready=False,
+def test_below_threshold_contact_check_does_not_poll_controller(monkeypatch):
+    env = object.__new__(FrankaPickAndPlaceEnv)
+    env.config = FrankaPickAndPlaceConfig(
+        camera_serials=["dummy"],
+        is_dummy=False,
+        enable_downward_contact_failure=True,
+        contact_force_threshold=10.0,
+        contact_force_confirmation_samples=3,
+        contact_monitor_interval=0.02,
     )
-    wrapper.reset()
+    env._franka_state = SimpleNamespace(gripper_open=True)
+    env._controller = SimpleNamespace(
+        get_state=lambda: (_ for _ in ()).throw(
+            AssertionError("below-threshold checks must not poll the controller")
+        )
+    )
+    monkeypatch.setattr(
+        "rlinf.envs.realworld.franka.tasks.pick_and_place_env.time.sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("below-threshold checks must not sleep")
+        ),
+    )
 
-    _, reward, terminated, _, info = wrapper.step(np.zeros(7, dtype=np.float32))
-
-    assert reward == 0.0
-    assert not terminated
-    assert not info["human_feedback_received"]
+    action = np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0])
+    assert env._confirm_downward_contact(action, 9.99) is None
 
 
-def test_abort_loss_mask_removes_only_aborted_episodes():
-    dones = torch.zeros((7, 2, 1), dtype=torch.bool)
-    aborts = torch.zeros_like(dones)
+def test_downward_contact_requires_consecutive_force_samples(monkeypatch):
+    class _Result:
+        def __init__(self, value=None):
+            self.value = value
 
-    dones[3, 0, 0] = True
-    aborts[3, 0, 0] = True
-    dones[6, 0, 0] = True
+        def wait(self):
+            return self.value
 
-    dones[2, 1, 0] = True
-    dones[5, 1, 0] = True
-    aborts[5, 1, 0] = True
+    class _Controller:
+        def __init__(self, states):
+            self.states = iter(states)
 
-    loss_mask, loss_mask_sum = compute_abort_loss_mask(dones, aborts)
+        def get_state(self):
+            return _Result([next(self.states)])
 
-    expected = torch.tensor(
+    action = np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0])
+    pose = np.array([0.5, 0.1, 0.05, 0.0, 0.0, 0.0, 1.0])
+    env = object.__new__(FrankaPickAndPlaceEnv)
+    env.config = FrankaPickAndPlaceConfig(
+        camera_serials=["dummy"],
+        is_dummy=False,
+        enable_downward_contact_failure=True,
+        contact_force_threshold=10.0,
+        contact_force_confirmation_samples=3,
+        contact_monitor_interval=0.02,
+    )
+    env._contact_force_baseline = np.zeros(3)
+    env._franka_state = SimpleNamespace(
+        tcp_force=np.array([0.0, 0.0, 15.74]),
+        tcp_pose=pose.copy(),
+        gripper_open=True,
+    )
+    monkeypatch.setattr(
+        "rlinf.envs.realworld.franka.tasks.pick_and_place_env.time.sleep",
+        lambda _: None,
+    )
+
+    env._controller = _Controller(
         [
-            [False, True],
-            [False, True],
-            [False, False],
-            [True, False],
-            [True, False],
-            [True, True],
-        ],
-        dtype=torch.bool,
-    ).unsqueeze(-1)
-    assert torch.equal(loss_mask, expected)
-    assert torch.equal(loss_mask_sum[:, 0], torch.full((6, 1), 3))
-    assert torch.equal(loss_mask_sum[:, 1], torch.full((6, 1), 3))
+            SimpleNamespace(
+                tcp_force=np.array([0.0, 0.0, 4.0]),
+                tcp_pose=pose.copy(),
+                gripper_open=True,
+            )
+        ]
+    )
+    assert env._confirm_downward_contact(action, 15.74) is None
+
+    env._controller = _Controller(
+        [
+            SimpleNamespace(
+                tcp_force=np.array([0.0, 0.0, 11.0]),
+                tcp_pose=pose.copy(),
+                gripper_open=True,
+            ),
+            SimpleNamespace(
+                tcp_force=np.array([0.0, 0.0, 12.0]),
+                tcp_pose=pose.copy(),
+                gripper_open=True,
+            ),
+        ]
+    )
+    assert env._confirm_downward_contact(action, 10.5) == 12.0
 
 
-def test_realworld_observation_uses_explicit_pnp_state_order():
-    env = object.__new__(RealWorldEnv)
-    env.state_keys = ["arm_joint_position", "tcp_pose", "gripper_open_state"]
-    env.include_states_in_obs = True
-    env.main_image_key = "wrist_1"
-    env.task_descriptions = ["pnp"]
-    raw_observation = {
-        "state": {
-            "tcp_pose": np.arange(6, dtype=np.float32)[None, :] + 10,
-            "gripper_open_state": np.array([[1.0]], dtype=np.float32),
-            "arm_joint_position": np.arange(7, dtype=np.float32)[None, :],
-        },
-        "frames": {
-            "wrist_2": np.zeros((1, 128, 128, 3), dtype=np.uint8),
-            "wrist_1": np.ones((1, 128, 128, 3), dtype=np.uint8),
-        },
-    }
+def test_gripper_command_interval_suppresses_rapid_reversal(monkeypatch):
+    class _Result:
+        def wait(self):
+            return None
 
-    observation = RealWorldEnv._wrap_obs(env, raw_observation)
+    class _Controller:
+        def __init__(self):
+            self.commands = []
 
-    expected_state = np.concatenate([np.arange(7), np.arange(6) + 10, np.array([1.0])])
-    np.testing.assert_array_equal(observation["states"].numpy()[0], expected_state)
-    assert observation["states"].shape == (1, 14)
-    assert observation["main_images"].shape == (1, 128, 128, 3)
-    assert observation["extra_view_images"].shape == (1, 1, 128, 128, 3)
+        def close_gripper(self):
+            self.commands.append("close")
+            return _Result()
 
+        def open_gripper(self):
+            self.commands.append("open")
+            return _Result()
 
-def test_pnp_video_tiles_main_and_auxiliary_camera_views():
-    env = _FakePnPEnv()
-    env.seed = 0
-    recorder = RecordVideo(env, {"include_extra_views": True})
-    observation = {
-        "main_images": np.ones((1, 8, 8, 3), dtype=np.uint8),
-        "extra_view_images": np.zeros((1, 1, 8, 8, 3), dtype=np.uint8),
-    }
-
-    frame_batches = recorder._extract_frame_batches(observation)
-    recorder.close()
-
-    assert len(frame_batches) == 1
-    assert len(frame_batches[0]) == 1
-    assert frame_batches[0][0].shape == (8, 16, 3)
-    assert np.all(frame_batches[0][0][:, :8] == 1)
-    assert np.all(frame_batches[0][0][:, 8:] == 0)
-
-
-def test_realworld_pnp_dummy_env_has_aligned_spaces_and_zero_task_reward():
-    env = FrankaPickAndPlaceEnv(
-        override_cfg={
-            "camera_serials": ["main", "aux"],
-            "is_dummy": True,
-            "target_ee_pose": [0.5, 0.0, 0.0, 3.14, 0.0, 0.0],
-        }
+    env = object.__new__(FrankaPickAndPlaceEnv)
+    env.config = SimpleNamespace(
+        use_zero_one_gripper_action=False,
+        binary_gripper_threshold=0.5,
+        gripper_min_command_interval=1.0,
+        gripper_open_confirm_steps=1,
+    )
+    env._controller = _Controller()
+    env._franka_state = SimpleNamespace(gripper_open=True)
+    env._last_gripper_command_time = float("-inf")
+    env._logger = SimpleNamespace(info=lambda *args: None)
+    env._gripper_open_command_count = 0
+    times = iter([10.0, 10.5, 11.1, 11.1])
+    monkeypatch.setattr(
+        "rlinf.envs.realworld.franka.franka_env.time.monotonic",
+        lambda: next(times),
+    )
+    monkeypatch.setattr(
+        "rlinf.envs.realworld.franka.franka_env.time.sleep", lambda _: None
     )
 
-    wrapped_env = Quat2EulerWrapper(env)
-    observation, _ = wrapped_env.reset()
-
-    assert env.action_space.shape == (7,)
-    assert list(observation["state"]) == [
-        "arm_joint_position",
-        "tcp_pose",
-        "gripper_open_state",
-    ]
-    assert observation["state"]["gripper_open_state"].shape == (1,)
-    assert observation["state"]["tcp_pose"].shape == (6,)
-    assert observation["state"]["tcp_pose"].dtype == np.float32
-    assert env._calc_step_reward(observation) == 0.0
+    assert env._gripper_action(-1.0)
+    env._franka_state.gripper_open = False
+    assert not env._gripper_action(1.0)
+    assert env._gripper_action(1.0)
+    assert env._controller.commands == ["close", "open"]

@@ -1,0 +1,15 @@
+defaults:
+  - maniskill_pick_and_place_ppo_residual_slz_s04_std0_n32_ue4
+  - _self_
+
+runner:
+  logger:
+    experiment_name: residual_slz_s04_std_m05_ent0_n32_ue4
+
+algorithm:
+  entropy_bonus: 0.0
+
+actor:
+  model:
+    initial_logstd: -0.5
+    logstd_range: [-4.0, 0.0]

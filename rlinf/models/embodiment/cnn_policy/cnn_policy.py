@@ -30,9 +30,34 @@ from rlinf.models.embodiment.modules.utils import init_mlp_weights, layer_init, 
 from rlinf.models.embodiment.modules.value_head import ValueHead
 
 
+def _select_policy_extra_view_images(
+    observations: dict[str, Any], image_num: int
+) -> Any | None:
+    required_extra_views = max(int(image_num) - 1, 0)
+    if required_extra_views == 0:
+        return None
+
+    extra_view_images = observations.get("extra_view_images")
+    if extra_view_images is None:
+        raise ValueError(f"extra_view_images is required when image_num={image_num}.")
+    if extra_view_images.ndim < 2:
+        raise ValueError(
+            "extra_view_images must include a camera-view dimension at index 1, "
+            f"got shape {tuple(extra_view_images.shape)}."
+        )
+    available_extra_views = int(extra_view_images.shape[1])
+    if available_extra_views < required_extra_views:
+        raise ValueError(
+            f"CNNPolicy image_num={image_num} requires {required_extra_views} extra "
+            f"camera view(s), but only {available_extra_views} were provided."
+        )
+    return extra_view_images[:, :required_extra_views]
+
+
 @dataclass
 class CNNConfig:
     image_size: list[int] = field(default_factory=list)
+    encoder_input_size: int = 128
     image_num: int = 1
     action_dim: int = 4
     state_dim: int = 29
@@ -49,12 +74,8 @@ class CNNConfig:
     independent_std: bool = True
     initial_logstd: float | list[float] = -0.5
     action_std_scale: list[float] = field(default_factory=list)
-    bc_action_loss_weights: list[float] = field(default_factory=list)
-    bc_smooth_l1_beta: float = 0.1
     binary_action_indices: list[int] = field(default_factory=list)
     binary_action_temperature: float = 1.0
-    state_mean: list[float] = field(default_factory=list)
-    state_std: list[float] = field(default_factory=list)
     action_scale = None
     final_tanh = False
     std_range = None
@@ -109,35 +130,24 @@ class CNNPolicy(nn.Module, BasePolicy):
         )
         if self.cfg.binary_action_temperature <= 0:
             raise ValueError("binary_action_temperature must be positive.")
+        if self.cfg.encoder_input_size <= 0:
+            raise ValueError("encoder_input_size must be positive.")
         if self.cfg.logstd_range is not None and (
             len(self.cfg.logstd_range) != 2
             or self.cfg.logstd_range[0] > self.cfg.logstd_range[1]
         ):
             raise ValueError("logstd_range must be [minimum, maximum].")
-        if self.cfg.action_std_scale:
-            if len(self.cfg.action_std_scale) != self.cfg.action_dim or any(
-                scale <= 0 for scale in self.cfg.action_std_scale
-            ):
-                raise ValueError(
-                    "action_std_scale must be empty or contain action_dim positive "
-                    "values."
-                )
+        if self.cfg.action_std_scale and (
+            len(self.cfg.action_std_scale) != self.cfg.action_dim
+            or any(scale <= 0 for scale in self.cfg.action_std_scale)
+        ):
+            raise ValueError(
+                "action_std_scale must be empty or contain action_dim positive values."
+            )
         if self._binary_action_indices and self.cfg.action_scale is not None:
             raise ValueError(
                 "Binary action channels cannot be combined with global action_scale."
             )
-        if bool(self.cfg.state_mean) != bool(self.cfg.state_std):
-            raise ValueError("state_mean and state_std must be configured together.")
-        if self.cfg.state_mean:
-            if (
-                len(self.cfg.state_mean) != self.cfg.state_dim
-                or len(self.cfg.state_std) != self.cfg.state_dim
-                or any(scale <= 0 for scale in self.cfg.state_std)
-            ):
-                raise ValueError(
-                    "state_mean and state_std must contain state_dim values, and "
-                    "all standard deviations must be positive."
-                )
         self.in_channels = self.cfg.image_size[0]
         self.register_buffer(
             "img_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 1, 3)
@@ -145,21 +155,16 @@ class CNNPolicy(nn.Module, BasePolicy):
         self.register_buffer(
             "img_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 1, 3)
         )
-        if self.cfg.state_mean:
-            self.register_buffer(
-                "state_mean", torch.tensor(self.cfg.state_mean, dtype=torch.float32)
-            )
-            self.register_buffer(
-                "state_std", torch.tensor(self.cfg.state_std, dtype=torch.float32)
-            )
-        else:
-            self.state_mean = None
-            self.state_std = None
         self.encoders = nn.ModuleList()
         self.cuda_graph_manager = None
         encoder_out_dim = 0
         if self.cfg.backbone == "resnet":
-            sample_x = torch.randn(1, *self.cfg.image_size)
+            sample_x = torch.randn(
+                1,
+                self.in_channels,
+                self.cfg.encoder_input_size,
+                self.cfg.encoder_input_size,
+            )
             for img_id in range(self.cfg.image_num):
                 self.encoders.append(
                     ResNetEncoder(
@@ -254,6 +259,50 @@ class CNNPolicy(nn.Module, BasePolicy):
             self.action_scale = None
         self.torch_compile_enabled = False
 
+    def _action_std(self, action_logstd: torch.Tensor) -> torch.Tensor:
+        if self.cfg.logstd_range is not None:
+            action_logstd = torch.clamp(
+                action_logstd, self.cfg.logstd_range[0], self.cfg.logstd_range[1]
+            )
+        action_std = torch.exp(action_logstd)
+        if self.cfg.action_std_scale:
+            action_std = action_std * action_std.new_tensor(self.cfg.action_std_scale)
+        if self.cfg.std_range is not None:
+            action_std = torch.clamp(
+                action_std, self.cfg.std_range[0], self.cfg.std_range[1]
+            )
+        return action_std
+
+    def _hybrid_action_statistics(
+        self,
+        action_mean: torch.Tensor,
+        action_std: torch.Tensor,
+        action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        logprobs = torch.zeros_like(action_mean)
+        entropy = torch.zeros_like(action_mean)
+        if self._continuous_action_indices:
+            indices = self._continuous_action_indices
+            continuous_dist = Normal(
+                action_mean[..., indices], action_std[..., indices]
+            )
+            bounded_action = action[..., indices].clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            latent_action = torch.atanh(bounded_action)
+            logprobs[..., indices] = continuous_dist.log_prob(
+                latent_action
+            ) - torch.log(1.0 - bounded_action.square() + 1e-6)
+            entropy[..., indices] = continuous_dist.entropy()
+        if self._binary_action_indices:
+            indices = self._binary_action_indices
+            binary_dist = Bernoulli(
+                logits=action_mean[..., indices]
+                / float(self.cfg.binary_action_temperature)
+            )
+            binary_action = (action[..., indices] > 0).to(action_mean.dtype)
+            logprobs[..., indices] = binary_dist.log_prob(binary_action)
+            entropy[..., indices] = binary_dist.entropy()
+        return logprobs, entropy
+
     def _get_feature_from_processed_tensors(
         self,
         main_images: torch.Tensor,
@@ -273,14 +322,20 @@ class CNNPolicy(nn.Module, BasePolicy):
             if images.shape[3] == 3:
                 # [B, H, W, C] -> [B, C, H, W]
                 images = images.permute(0, 3, 1, 2)
+            encoder_size = (self.cfg.encoder_input_size,) * 2
+            if images.shape[-2:] != encoder_size:
+                images = F.interpolate(
+                    images,
+                    size=encoder_size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
             visual_features.append(self.encoders[img_id](images))
         visual_feature = torch.cat(visual_features, dim=-1)
         full_feature = visual_feature
         if self.cfg.use_state:
             if states is None:
-                raise ValueError(
-                    "states is required when CNNPolicy cfg.use_state=True."
-                )
+                raise ValueError("states is required when CNNPolicy cfg.use_state=True.")
             state_embed = self.state_proj(states)
             full_feature = torch.cat([visual_feature, state_embed], dim=1)
         return full_feature, visual_feature
@@ -310,52 +365,6 @@ class CNNPolicy(nn.Module, BasePolicy):
         mix_feature, action_mean, action_logstd = self._policy_head(full_feature)
         return full_feature, mix_feature, action_mean, action_logstd
 
-    def _action_std(self, action_logstd: torch.Tensor) -> torch.Tensor:
-        """Build the continuous-action standard deviation used by rollout and PPO."""
-        if self.cfg.logstd_range is not None:
-            action_logstd = torch.clamp(
-                action_logstd, self.cfg.logstd_range[0], self.cfg.logstd_range[1]
-            )
-        action_std = torch.exp(action_logstd)
-        if self.cfg.action_std_scale:
-            action_std = action_std * action_std.new_tensor(self.cfg.action_std_scale)
-        if self.cfg.std_range is not None:
-            action_std = torch.clamp(
-                action_std, self.cfg.std_range[0], self.cfg.std_range[1]
-            )
-        return action_std
-
-    def _hybrid_action_statistics(
-        self,
-        action_mean: torch.Tensor,
-        action_std: torch.Tensor,
-        action: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return per-channel log-probability and entropy for hybrid actions."""
-        logprobs = torch.zeros_like(action_mean)
-        entropy = torch.zeros_like(action_mean)
-        if self._continuous_action_indices:
-            indices = self._continuous_action_indices
-            continuous_dist = Normal(
-                action_mean[..., indices], action_std[..., indices]
-            )
-            bounded_action = action[..., indices].clamp(-1.0 + 1e-6, 1.0 - 1e-6)
-            latent_action = torch.atanh(bounded_action)
-            logprobs[..., indices] = continuous_dist.log_prob(
-                latent_action
-            ) - torch.log(1.0 - bounded_action.square() + 1e-6)
-            entropy[..., indices] = continuous_dist.entropy()
-        if self._binary_action_indices:
-            indices = self._binary_action_indices
-            binary_dist = Bernoulli(
-                logits=action_mean[..., indices]
-                / float(self.cfg.binary_action_temperature)
-            )
-            binary_action = (action[..., indices] > 0).to(action_mean.dtype)
-            logprobs[..., indices] = binary_dist.log_prob(binary_action)
-            entropy[..., indices] = binary_dist.entropy()
-        return logprobs, entropy
-
     @property
     def num_action_chunks(self):
         return self.cfg.num_action_chunks
@@ -367,15 +376,15 @@ class CNNPolicy(nn.Module, BasePolicy):
 
         processed_env_obs = {}
         if self.cfg.use_state and env_obs.get("states") is not None:
-            states = env_obs["states"].clone().to(device=device, dtype=torch.float32)
-            if self.state_mean is not None:
-                states = (states - self.state_mean) / self.state_std
-            processed_env_obs["states"] = states
+            processed_env_obs["states"] = env_obs["states"].clone().to(device)
         x = env_obs["main_images"].clone().to(device).float() / 255.0
         processed_env_obs["main_images"] = (x - mean) / std
 
-        if env_obs.get("extra_view_images", None) is not None:
-            ex = env_obs["extra_view_images"].clone().to(device).float() / 255.0
+        extra_view_images = _select_policy_extra_view_images(
+            env_obs, self.cfg.image_num
+        )
+        if extra_view_images is not None:
+            ex = extra_view_images.clone().to(device).float() / 255.0
             ex = (ex - mean.unsqueeze(1)) / std.unsqueeze(1)
             processed_env_obs["extra_view_images"] = ex
 
@@ -392,23 +401,6 @@ class CNNPolicy(nn.Module, BasePolicy):
             visual_feature = visual_feature.detach()
         return x, visual_feature
 
-    def prepare_dagger_sft_batch(self, batch):
-        """Prepare image/state expert samples for supervised action training."""
-        target_actions = (
-            batch["model_action"] if "model_action" in batch else batch["action"]
-        )
-        data = {
-            "main_images": batch["main_images"],
-            "action": target_actions,
-        }
-        if "states" in batch:
-            data["states"] = batch["states"]
-        if "extra_view_images" in batch:
-            data["extra_view_images"] = batch["extra_view_images"]
-        if "action_transition" in batch:
-            data["action_transition"] = batch["action_transition"]
-        return data
-
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         obs = kwargs.get("obs", None)
         if obs is not None:
@@ -419,9 +411,7 @@ class CNNPolicy(nn.Module, BasePolicy):
             next_obs = self.preprocess_env_obs(next_obs)
             kwargs.update({"next_obs": next_obs})
 
-        if forward_type == ForwardType.SFT:
-            return self.sft_forward(**kwargs)
-        elif forward_type == ForwardType.SAC:
+        if forward_type == ForwardType.SAC:
             return self.sac_forward(**kwargs)
         elif forward_type == ForwardType.SAC_Q:
             return self.sac_q_forward(**kwargs)
@@ -433,113 +423,6 @@ class CNNPolicy(nn.Module, BasePolicy):
             return self.default_forward(**kwargs)
         else:
             raise NotImplementedError
-
-    def sft_forward(self, data, **kwargs):
-        obs = {
-            "main_images": data["main_images"],
-            "states": data.get("states"),
-            "extra_view_images": data.get("extra_view_images"),
-        }
-        obs = self.preprocess_env_obs(obs)
-        _, _, action_parameters, _ = self._actor_forward_from_processed_tensors(
-            main_images=obs["main_images"],
-            states=obs.get("states"),
-            extra_view_images=obs.get("extra_view_images"),
-        )
-        predicted_actions = action_parameters.clone()
-        if self._continuous_action_indices:
-            predicted_actions[..., self._continuous_action_indices] = torch.tanh(
-                action_parameters[..., self._continuous_action_indices]
-            )
-        target_actions = data["action"].to(
-            device=predicted_actions.device, dtype=predicted_actions.dtype
-        )
-        if predicted_actions.shape != target_actions.shape:
-            if predicted_actions.numel() != target_actions.numel():
-                raise ValueError(
-                    "CNN BC targets must match the predicted action shape, "
-                    f"got predicted {predicted_actions.shape} and target "
-                    f"{target_actions.shape}."
-                )
-            target_actions = target_actions.reshape_as(predicted_actions)
-
-        loss = F.smooth_l1_loss(
-            predicted_actions,
-            target_actions,
-            reduction="none",
-            beta=float(self.cfg.bc_smooth_l1_beta),
-        )
-        binary_indices = self._binary_action_indices
-        metrics = {}
-        if binary_indices:
-            binary_logits = predicted_actions[..., binary_indices]
-            binary_targets = (target_actions[..., binary_indices] > 0).to(
-                binary_logits.dtype
-            )
-            loss[..., binary_indices] = F.binary_cross_entropy_with_logits(
-                binary_logits, binary_targets, reduction="none"
-            )
-
-            predicted_open = binary_logits >= 0
-            target_open = binary_targets.bool()
-            metrics = self._binary_sft_counts(
-                predicted_open,
-                target_open,
-                data.get("action_transition"),
-            )
-        action_loss_weights = self.cfg.bc_action_loss_weights
-        if action_loss_weights:
-            if len(action_loss_weights) != loss.shape[-1]:
-                raise ValueError(
-                    "bc_action_loss_weights must match action_dim, "
-                    f"got {len(action_loss_weights)} weights for {loss.shape[-1]} actions."
-                )
-            weights = loss.new_tensor(action_loss_weights)
-            loss = loss * weights
-        return loss, metrics
-
-    @staticmethod
-    def _binary_sft_counts(
-        predicted_open: torch.Tensor,
-        target_open: torch.Tensor,
-        action_transition: Optional[torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Compute additive binary-action metrics for distributed reduction."""
-        correct = predicted_open == target_open
-        close_mask = ~target_open
-        open_mask = target_open
-        counts = {
-            "binary_accuracy_correct": correct.sum(),
-            "binary_accuracy_count": torch.tensor(
-                correct.numel(), device=correct.device, dtype=torch.long
-            ),
-            "binary_close_recall_correct": (correct & close_mask).sum(),
-            "binary_close_recall_count": close_mask.sum(),
-            "binary_open_recall_correct": (correct & open_mask).sum(),
-            "binary_open_recall_count": open_mask.sum(),
-        }
-        if action_transition is None:
-            return counts
-
-        transition_mask = action_transition.to(device=correct.device, dtype=torch.bool)
-        while transition_mask.ndim < correct.ndim:
-            transition_mask = transition_mask.unsqueeze(-1)
-        transition_mask = transition_mask.expand_as(correct)
-        transition_close = transition_mask & close_mask
-        transition_open = transition_mask & open_mask
-        counts.update(
-            {
-                "binary_transition_close_recall_correct": (
-                    correct & transition_close
-                ).sum(),
-                "binary_transition_close_recall_count": transition_close.sum(),
-                "binary_transition_open_recall_correct": (
-                    correct & transition_open
-                ).sum(),
-                "binary_transition_open_recall_count": transition_open.sum(),
-            }
-        )
-        return counts
 
     def default_forward(
         self,
@@ -631,7 +514,6 @@ class CNNPolicy(nn.Module, BasePolicy):
             )
         )
         action_std = self._action_std(action_logstd)
-
         if mode not in ("train", "eval"):
             raise NotImplementedError(f"{mode=}")
 
@@ -650,8 +532,7 @@ class CNNPolicy(nn.Module, BasePolicy):
                     )
                 else:
                     continuous_action = action_mean[..., indices]
-                bounded_action = torch.tanh(continuous_action)
-                action[..., indices] = bounded_action
+                action[..., indices] = torch.tanh(continuous_action)
 
             indices = self._binary_action_indices
             binary_dist = Bernoulli(
@@ -673,14 +554,15 @@ class CNNPolicy(nn.Module, BasePolicy):
             else:
                 raw_action = action_mean.clone()
             chunk_logprobs = probs.log_prob(raw_action)
-            action = raw_action
-        if self.action_scale is not None:
-            action_normalized = torch.tanh(raw_action)
-            action = action_normalized * self.action_scale + self.action_bias
+            if self.action_scale is not None:
+                action_normalized = torch.tanh(raw_action)
+                action = action_normalized * self.action_scale + self.action_bias
+                chunk_logprobs = chunk_logprobs - torch.log(
+                    self.action_scale * (1 - action_normalized.pow(2)) + 1e-6
+                )
+            else:
+                action = raw_action
 
-            chunk_logprobs = chunk_logprobs - torch.log(
-                self.action_scale * (1 - action_normalized.pow(2)) + 1e-6
-            )
         chunk_actions = action.reshape(
             -1, self.cfg.num_action_chunks, self.cfg.action_dim
         )
@@ -718,11 +600,11 @@ class CNNPolicy(nn.Module, BasePolicy):
             forward_inputs["main_images"] = env_obs["main_images"]
             if "states" in env_obs and env_obs["states"] is not None:
                 forward_inputs["states"] = env_obs["states"]
-            if (
-                "extra_view_images" in env_obs
-                and env_obs["extra_view_images"] is not None
-            ):
-                forward_inputs["extra_view_images"] = env_obs["extra_view_images"]
+            extra_view_images = _select_policy_extra_view_images(
+                env_obs, self.cfg.image_num
+            )
+            if extra_view_images is not None:
+                forward_inputs["extra_view_images"] = extra_view_images
 
         result = {
             "prev_logprobs": chunk_logprobs,

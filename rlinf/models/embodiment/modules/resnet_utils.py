@@ -142,7 +142,9 @@ class ResNetEncoder(nn.Module):
         assert "ckpt_path" in self.encoder_cfg, (
             "Please use model_path and ckpt_name to specify the pretrained encoder weights path."
         )
-        model_dict = torch.load(self.encoder_cfg["ckpt_path"])
+        model_dict = torch.load(
+            self.encoder_cfg["ckpt_path"], map_location="cpu", weights_only=True
+        )
         self.resnet_backbone.load_state_dict(model_dict)
 
     def _freeze_backbone_weights(self):

@@ -72,13 +72,22 @@ class EmbodiedRunner:
         self.reward = reward
         self.weight_sync_interval = self.cfg.runner.weight_sync_interval
         # Data channels
-        self.env_channel = Channel.create("Env")
-        self.rollout_channel = Channel.create("Rollout")
+        use_distributed_channels = bool(
+            self.cfg.algorithm.get("sim_real_rl_co_training", False)
+        )
+        self.env_channel = Channel.create("Env", distributed=use_distributed_channels)
+        self.rollout_channel = Channel.create(
+            "Rollout", distributed=use_distributed_channels
+        )
         actor_channel_maxsize = 0
-        if self.cfg.algorithm.get("sim_real_rl_co_training", False):
+        if use_distributed_channels:
             buffer_cfg = self.cfg.algorithm.get("co_training_domain_buffer", {})
             actor_channel_maxsize = int(buffer_cfg.get("channel_maxsize", 1))
-        self.actor_channel = Channel.create("Actor", maxsize=actor_channel_maxsize)
+        self.actor_channel = Channel.create(
+            "Actor",
+            maxsize=actor_channel_maxsize,
+            distributed=use_distributed_channels,
+        )
         if self.reward is not None:
             self.reward_channel = Channel.create("Reward")
         else:
@@ -272,13 +281,6 @@ class EmbodiedRunner:
     def run(self):
         start_step = self.global_step
         start_time = time.time()
-        if self.cfg.runner.get("eval_before_training", False):
-            self.update_rollout_weights()
-            initial_eval_metrics = {
-                f"eval/{key}": value for key, value in self.evaluate().items()
-            }
-            self.metric_logger.log(initial_eval_metrics, step=self.global_step)
-
         for _step in range(start_step, self.max_steps):
             # set global step
             self.actor.set_global_step(self.global_step)
@@ -339,7 +341,7 @@ class EmbodiedRunner:
                         self.update_rollout_weights()
                         eval_metrics = self.evaluate()
                         eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
-                        self.metric_logger.log(data=eval_metrics, step=self.global_step)
+                        self.metric_logger.log(data=eval_metrics, step=_step)
 
                 if save_model:
                     self._save_checkpoint()
