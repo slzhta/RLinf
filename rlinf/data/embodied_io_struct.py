@@ -109,13 +109,17 @@ class EnvOutput:
             else None
         )
 
-        return {
+        prepared_obs = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        for key in ("base_actions", "base_action_mask"):
+            if key in obs:
+                prepared_obs[key] = obs[key]
+        return prepared_obs
 
     @staticmethod
     def merge_env_outputs(env_outputs: list[dict]) -> dict[str, Any]:

@@ -1,0 +1,28 @@
+defaults:
+  - cnn_policy
+  - _self_
+
+model_type: residual_policy
+# Directory containing encoder_config.ckpt_name, as for the native CNN policy.
+model_path: ""
+enabled: true
+num_action_chunks: 1
+action_dim: 7
+add_value_head: true
+add_q_head: false
+base_horizon: 10
+
+image_num: 2
+image_size: [3, 128, 128]
+use_state: false
+state_dim: 14
+state_mean: []
+state_std: []
+encoder_config:
+  dropout: 0.0
+
+# The gripper follows OpenPI. Only active dimensions contribute PPO likelihoods.
+residual_action_indices: [0, 1, 2, 3, 4, 5]
+residual_action_scale: [0.3, 0.3, 0.3, 0.1, 0.1, 0.3, 0.0]
+initial_logstd: -3.0
+logstd_range: [-5.0, -1.0]

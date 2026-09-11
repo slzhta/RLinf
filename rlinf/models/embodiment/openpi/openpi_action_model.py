@@ -490,6 +490,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         # wrist image observation
         if env_obs["wrist_images"] is not None:
             processed_obs["observation/wrist_image"] = env_obs["wrist_images"]
+        elif env_obs["extra_view_images"] is not None:
+            extra = env_obs["extra_view_images"]
+            if extra.ndim != 5 or extra.shape[1] < 1:
+                raise ValueError("Expected extra_view_images with shape [B, N, H, W, C].")
+            processed_obs["observation/wrist_image"] = extra[:, 0]
         # extra view image observation
         if env_obs["extra_view_images"] is not None:
             processed_obs["observation/extra_view_image"] = env_obs["extra_view_images"]
