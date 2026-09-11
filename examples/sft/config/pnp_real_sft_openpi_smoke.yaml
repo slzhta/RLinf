@@ -1,0 +1,91 @@
+defaults:
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: 0-0
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "pi05_pnp_real_sft_smoke"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 10
+  max_steps: 10
+  val_check_interval: -1
+  save_interval: -1
+
+data:
+  train_data_paths: "/home/ubuntu/wangyinghan/wangyitao/pnp_lerobot_dataset"
+
+algorithm:
+  adv_type: gae
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1
+  global_batch_size: 1
+  seed: 0
+
+  model:
+    precision: null
+    model_path: "/mnt/RLinf/lerobot_pi05_base"
+
+    is_lora: true
+    lora_rank: 8
+
+    num_action_chunks: 10
+    action_dim: 7
+    add_value_head: false
+
+    openpi:
+      config_name: "pi05_pnp_real"
+      num_images_in_input: 2
+      action_chunk: 10
+      action_env_dim: 7
+      train_expert_only: true
+      detach_critic_input: true
+
+  optim:
+    lr: 1.0e-5
+    value_lr: 1.55e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    warmup_style: "cosine"
+    lr_warmup_steps: 1
+    total_training_steps: 10
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: false
+    gradient_checkpointing: false
+
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

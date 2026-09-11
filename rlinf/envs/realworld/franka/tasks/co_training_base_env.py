@@ -244,8 +244,10 @@ class FrankaCoTrainingBaseEnv(FrankaEnv):
         Move to the rest position defined in base class.
         Add a small z offset before going to rest to avoid collision with object.
         """
-        self._controller.open_gripper().wait()
-        time.sleep(0.6)
+        # The cached gripper flag can be stale across process/robot restarts. Reset
+        # must establish the physical state instead of skipping an open command
+        # merely because software already believes the gripper is open.
+        self._gripper_action(1, force_command=True)
         self._franka_state = self._controller.get_state().wait()[0]
         self._move_action(self._franka_state.tcp_pose)
         time.sleep(0.5)

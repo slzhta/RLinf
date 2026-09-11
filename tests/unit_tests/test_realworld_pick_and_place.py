@@ -306,11 +306,14 @@ def test_gripper_command_interval_suppresses_rapid_reversal(monkeypatch):
         use_zero_one_gripper_action=False,
         binary_gripper_threshold=0.5,
         gripper_min_command_interval=1.0,
+        gripper_open_confirm_steps=1,
     )
     env._controller = _Controller()
     env._franka_state = SimpleNamespace(gripper_open=True)
     env._last_gripper_command_time = float("-inf")
-    times = iter([10.0, 10.5, 11.1])
+    env._logger = SimpleNamespace(info=lambda *args: None)
+    env._gripper_open_command_count = 0
+    times = iter([10.0, 10.5, 11.1, 11.1])
     monkeypatch.setattr(
         "rlinf.envs.realworld.franka.franka_env.time.monotonic",
         lambda: next(times),
