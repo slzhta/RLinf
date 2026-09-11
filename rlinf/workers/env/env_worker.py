@@ -1239,6 +1239,13 @@ class EnvWorker(Worker):
             and self._component_placement.get_world_size("env") > 1
         )
 
+    def _residual_rollout_obs(self, env_batch: dict) -> dict:
+        """Signal resets to the rollout-local frozen action cache."""
+        obs = env_batch["obs"]
+        if not self.cfg.rollout.get("residual_base_inference", False):
+            return obs
+        return {**obs, "_residual_reset_mask": env_batch["dones"].any(dim=1)}
+
     @Worker.timer("run_interact_once")
     async def _run_interact_once(
         self,
@@ -1266,7 +1273,7 @@ class EnvWorker(Worker):
                 self.send_env_batch(
                     rollout_channel,
                     {
-                        "obs": env_batch["obs"],
+                        "obs": self._residual_rollout_obs(env_batch),
                         "final_obs": env_batch["final_obs"],
                     },
                 )
@@ -1331,7 +1338,7 @@ class EnvWorker(Worker):
                     self.send_env_batch(
                         rollout_channel,
                         {
-                            "obs": env_batch["obs"],
+                            "obs": self._residual_rollout_obs(env_batch),
                             "final_obs": env_batch["final_obs"],
                         },
                     )

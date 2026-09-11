@@ -41,6 +41,7 @@ class MultiStepRolloutWorker(Worker):
 
         self.cfg = cfg
         self.should_stop = False
+        self.residual_inference = None
 
         self.actor_group_name = cfg.actor.group_name
         self.device = self.torch_platform.current_device()
@@ -392,7 +393,11 @@ class MultiStepRolloutWorker(Worker):
 
     @Worker.timer("predict")
     def predict(
-        self, env_obs: dict[str, Any], mode: Literal["train", "eval"] = "train"
+        self,
+        env_obs: dict[str, Any],
+        mode: Literal["train", "eval"] = "train",
+        *,
+        consume_base: bool = True,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         kwargs = (
             self._train_sampling_params
@@ -406,6 +411,7 @@ class MultiStepRolloutWorker(Worker):
             SupportedModel.GR00T,
             SupportedModel.DREAMZERO,
             SupportedModel.CNN_POLICY,
+            SupportedModel.RESIDUAL_POLICY,
         ]:
             if self.cfg.algorithm.loss_type == "embodied_dagger":
                 kwargs = {"mode": "eval"}
@@ -414,6 +420,7 @@ class MultiStepRolloutWorker(Worker):
 
         if SupportedModel(self.cfg.actor.model.model_type) in [
             SupportedModel.CNN_POLICY,
+            SupportedModel.RESIDUAL_POLICY,
             SupportedModel.FLOW_POLICY,
             SupportedModel.MLP_POLICY,
         ]:
@@ -438,6 +445,18 @@ class MultiStepRolloutWorker(Worker):
                     **kwargs,
                 )
                 expert_label_flag = True
+            elif self.cfg.rollout.get("residual_base_inference", False):
+                if self.residual_inference is None:
+                    from rlinf.workers.rollout.hf.residual_inference import (
+                        RolloutResidualInference,
+                    )
+
+                    self.residual_inference = RolloutResidualInference(
+                        self.cfg, self.device
+                    )
+                actions, result = self.residual_inference.predict(
+                    self.hf_model, env_obs, consume=consume_base, **kwargs
+                )
             else:
                 actions, result = self.hf_model.predict_action_batch(
                     env_obs=env_obs,
@@ -472,6 +491,8 @@ class MultiStepRolloutWorker(Worker):
     def get_bootstrap_values(
         self, final_obs: dict[str, Any] | None
     ) -> torch.Tensor | None:
+        if self.cfg.rollout.get("residual_base_inference", False):
+            return None
         if final_obs is None:
             return None
         if not (
@@ -538,7 +559,7 @@ class MultiStepRolloutWorker(Worker):
                 self.send_rollout_result(output_channel, rollout_result, mode="train")
         for _ in range(self.num_pipeline_stages):
             env_output = await self.recv_env_output(input_channel)
-            actions, result = self.predict(env_output["obs"])
+            actions, result = self.predict(env_output["obs"], consume_base=False)
 
             rollout_result = RolloutResult(
                 actions=actions,
