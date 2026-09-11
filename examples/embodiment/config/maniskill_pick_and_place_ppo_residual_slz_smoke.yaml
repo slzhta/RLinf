@@ -1,0 +1,16 @@
+defaults:
+  - maniskill_pick_and_place_ppo_residual_a4
+  - _self_
+
+runner:
+  max_epochs: 2
+  val_check_interval: -1
+  save_interval: 1
+  logger:
+    experiment_name: residual_slz_smoke
+
+env:
+  train:
+    video_cfg:
+      save_video: true
+      record_rollout_interval: 1

@@ -20,6 +20,8 @@ were previously embedded in :class:`FrankaController`.
 
 import numpy as np
 
+from rlinf.utils.logging import get_logger
+
 from .base_gripper import BaseGripper
 
 
@@ -40,20 +42,21 @@ class FrankaGripper(BaseGripper):
     def __init__(
         self,
         ros,
-        open_width: float = 0.09,
+        open_width: float = 0.08,
         open_speed: float = 0.3,
         close_width: float = 0.01,
         close_speed: float = 0.3,
         close_force: float = 130.0,
-        epsilon_inner: float = 1.0,
-        epsilon_outer: float = 1.0,
+        epsilon_inner: float = 0.005,
+        epsilon_outer: float = 0.060,
     ):
-        from franka_gripper.msg import GraspActionGoal, MoveActionGoal
+        from franka_gripper.msg import (GraspActionGoal, GraspActionResult, MoveActionGoal, MoveActionResult)
         from sensor_msgs.msg import JointState
 
         self._ros = ros
         self._GraspActionGoal = GraspActionGoal
         self._MoveActionGoal = MoveActionGoal
+        self._logger = get_logger()
 
         self._position_value: float = 0.0
         self._is_open_flag: bool = True
@@ -69,12 +72,24 @@ class FrankaGripper(BaseGripper):
         # ROS channels
         self._move_channel = "/franka_gripper/move/goal"
         self._grasp_channel = "/franka_gripper/grasp/goal"
+        self._grasp_result_channel = "/franka_gripper/grasp/result"
+        self._move_result_channel = "/franka_gripper/move/result"
         self._state_channel = "/franka_gripper/joint_states"
 
         self._ros.create_ros_channel(self._move_channel, MoveActionGoal, queue_size=1)
         self._ros.create_ros_channel(self._grasp_channel, GraspActionGoal, queue_size=1)
         self._ros.connect_ros_channel(
             self._state_channel, JointState, self._on_state_msg
+        )
+        self._ros.connect_ros_channel(
+            self._grasp_result_channel,
+            GraspActionResult,
+            self._on_grasp_result_msg,
+        )
+        self._ros.connect_ros_channel(
+            self._move_result_channel,
+            MoveActionResult,
+            self._on_move_result_msg,
         )
 
     # ── BaseGripper interface ────────────────────────────────────────
@@ -83,6 +98,7 @@ class FrankaGripper(BaseGripper):
         msg = self._MoveActionGoal()
         msg.goal.width = self._open_width
         msg.goal.speed = self._open_speed if speed is None else speed
+        self._logger.info(f"Franka open requested: width={msg.goal.width}, speed={msg.goal.speed}")
         self._ros.put_channel(self._move_channel, msg)
         self._is_open_flag = True
 
@@ -95,6 +111,7 @@ class FrankaGripper(BaseGripper):
         msg.goal.epsilon.inner = self._epsilon_inner
         msg.goal.epsilon.outer = self._epsilon_outer
         msg.goal.force = self._close_force if force is None else force
+        self._logger.info(f"Franka close requested: width={msg.goal.width}, force={msg.goal.force}")
         self._ros.put_channel(self._grasp_channel, msg)
         self._is_open_flag = False
 
@@ -120,3 +137,25 @@ class FrankaGripper(BaseGripper):
     def _on_state_msg(self, msg) -> None:
         self._position_value = np.sum(msg.position)
         self._is_ready_flag = True
+
+    def _on_grasp_result_msg(self, msg) -> None:
+        """Log the hardware grasp result without changing command state."""
+        success = bool(msg.result.success)
+        log = self._logger.info if success else self._logger.warning
+        log(
+            "Franka gripper grasp result: "
+            f"state={msg.status.status}, success={success}, "
+            f"error={msg.result.error!r}, "
+            f"measured_width={self._position_value:.4f} m"
+        )
+
+    def _on_move_result_msg(self, msg) -> None:
+        """Log whether the physical open/move command was accepted."""
+        success = bool(msg.result.success)
+        log = self._logger.info if success else self._logger.warning
+        log(
+            "Franka gripper move result: "
+            f"state={msg.status.status}, success={success}, "
+            f"error={msg.result.error!r}, "
+            f"measured_width={self._position_value:.4f} m"
+        )

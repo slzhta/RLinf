@@ -1,0 +1,193 @@
+defaults:
+  - env/maniskill_pick_and_place_co_rl@env.train
+  - env/maniskill_pick_and_place_co_rl@env.eval
+  - model/cnn_policy@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH,./results}
+    project_name: rlinf
+    experiment_name: "maniskill_pick_and_place_bc_v3_cnn_state"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 3000
+  max_steps: 3000
+  only_eval: false
+  eval_before_training: true
+  val_check_interval: 1000
+  save_interval: 1000
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  dagger:
+    init_beta: 0.0
+    beta_schedule: "exponential"
+    beta_decay: 1.0
+    beta_min: 0.0
+    only_save_expert: true
+
+  rollout_epoch: 1
+  # Evaluate two deterministic 64-env batches to retain a fixed denominator of 128
+  # without exceeding SAPIEN's single-camera-group buffer limit on a 24 GB GPU.
+  eval_rollout_epoch: 2
+  gamma: 0.0
+  update_epoch: 1
+  adv_type: gae
+  # This runner supplies replay-based SFT. Beta zero keeps training purely offline.
+  loss_type: embodied_dagger
+
+  sampling_params:
+    do_sample: false
+    temperature_train: 1.0
+    temperature_eval: -1.0
+    top_k: 0
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+  replay_buffer:
+    enable_cache: true
+    cache_size: 1000
+    min_buffer_size: 32
+    # Zero uses every trajectory instead of silently truncating a >1000-demo set.
+    sample_window_size: 0
+    # Uniform unique transitions avoid both duplicated samples and phase bias.
+    sampling_weight_key: null
+    sample_without_replacement: true
+    load_path: ${oc.env:RLINF_LOG_PATH,./results}/maniskill_pick_and_place_demos_success_v2/seed_1400/demos
+    manifest_path: ${oc.env:RLINF_LOG_PATH,./results}/maniskill_pick_and_place_demos_success_v2/seed_1400/demos/collection_summary.json
+    required_data_format_version: 2
+    required_num_trajectories: 1000
+    auto_save: false
+
+env:
+  group_name: "EnvGroup"
+  sim_real_alignment:
+    controller:
+      target_ee_pose: [0.54515648, 0.03448609, -0.01847301, 3.07488508, -0.01941186, -0.0446862]
+      action_scale: [0.01, 0.05, 1.0]
+      clip_x_range: 0.15
+      clip_y_range: 0.15
+      clip_z_range_high: 0.15
+      clip_z_range_low: 0.025
+      clip_rz_range: 0.5
+      clip_rp_range: 0.01
+      use_target_controller: true
+
+  train:
+    total_num_envs: 1
+    num_workers: 1
+    include_states_in_obs: true
+    # Offline BC only needs the bootstrap observation used by the shared runner.
+    # Zero action steps prevent unrelated policy rollouts from entering the simulator.
+    max_steps_per_rollout_epoch: 0
+    video_cfg:
+      save_video: false
+
+  eval:
+    total_num_envs: 64
+    num_workers: 1
+    # A held-out seed keeps the same 128-task manifest at every checkpoint.
+    seed: 50000
+    auto_reset: false
+    include_states_in_obs: true
+    max_episode_steps: 120
+    max_steps_per_rollout_epoch: 120
+    use_fixed_reset_state_ids: false
+    video_cfg:
+      save_video: false
+      video_base_dir: runtime_env:RLINF_LOG_PATH/video/eval
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  enable_offload: false
+  pipeline_stage_num: 1
+  collect_prev_infos: false
+  model:
+    model_path: "/mnt/RLinf"
+    precision: ${actor.model.precision}
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 128
+  global_batch_size: 1024
+  seed: 1234
+  enable_offload: false
+
+  model:
+    model_path: "/mnt/RLinf"
+    add_value_head: true
+    add_q_head: false
+    use_state: true
+    state_dim: 14
+    action_dim: 7
+    image_num: 1
+    initial_logstd: -2.0
+    logstd_range: [-3.0, -1.5]
+    binary_action_indices: [6]
+    # Standard BCE logits and PPO use the same calibrated Bernoulli policy.
+    binary_action_temperature: 1.0
+    state_mean: [0.11703561, 0.28401735, 0.01233806, -2.17217875, -0.10318139, 2.42590690, 0.94398105, 0.54412913, 0.05818504, 0.05843670, 3.07757211, 0.02182078, 0.04845542, 0.59887797]
+    state_std: [0.09065868, 0.11137259, 0.05683328, 0.12966879, 0.02418517, 0.08201895, 0.23882970, 0.03423407, 0.07275123, 0.03352774, 0.00410973, 0.01300983, 0.20076044, 0.30573985]
+    action_std_scale: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 1.0]
+    # z precision and persistent gripper state are the two critical PnP outputs.
+    bc_action_loss_weights: [1.0, 1.0, 2.0, 0.1, 0.1, 0.1, 2.0]
+    bc_smooth_l1_beta: 0.1
+    encoder_config:
+      dropout: 0.0
+      freeze_backbone: false
+
+  optim:
+    # Newly initialized pooling/policy layers learn faster than the pretrained CNN.
+    lr: 3.0e-4
+    backbone_lr: 3.0e-5
+    value_lr: 2.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-06
+    clip_grad: 1.0
+    lr_scheduler: cosine
+    lr_warmup_steps: 50
+    min_lr_rate: 0.1
+    total_training_steps: ${runner.max_steps}
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

@@ -1,0 +1,54 @@
+defaults:
+  - env/maniskill_pick_and_place_co_rl@env.train
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+runner:
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH,./results}/maniskill_pick_and_place_demos_success_v2
+
+env:
+  train:
+    total_num_envs: ${collector.num_envs}
+    auto_reset: false
+    include_states_in_obs: true
+    max_episode_steps: 120
+    max_steps_per_rollout_epoch: 120
+    video_cfg:
+      save_video: false
+
+collector:
+  output_dir: ${runner.logger.log_path}/seed_${collector.seed}/demos
+  video_output_dir: ${runner.logger.log_path}/seed_${collector.seed}/videos
+  num_episodes: 1000
+  num_envs: 64
+  seed: 1400
+  max_attempt_batches: 1000
+  save_video_count: 8
+  video_fps: 5
+  # BC uses uniform sampling without replacement; keep metadata neutral.
+  transition_sampling_weight: 1.0
+
+  diversity:
+    reject_near_duplicates: true
+    # Fingerprints use task pose, TCP pose, and the quantized action sequence.
+    initial_state_resolution: 0.001
+    action_resolution: 0.02
+    min_unique_candidate_ratio: 0.9
+
+  expert:
+    control_gain: 0.35
+    max_position_action: 0.75
+    position_tolerance: 0.012
+    grasp_position_tolerance: 0.007
+    hover_height: 0.0925
+    transit_height: 0.1225
+    grasp_tcp_z_offset: 0.011
+    place_tcp_z_offset: 0.013
