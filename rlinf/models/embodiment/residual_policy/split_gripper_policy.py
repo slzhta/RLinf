@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-from torch.distributions import Bernoulli
+from torch.distributions import Bernoulli, Normal
 
 from rlinf.models.embodiment.residual_policy.gripper_cnn import (
     GripperCNN,
@@ -25,12 +25,15 @@ class SplitGripperConfig(ResidualConfig):
     """Optional split policy; original residual configurations are unchanged."""
 
     gripper_mode: str = "cnn"
+    gripper_architecture: str = "independent"
     gripper_checkpoint: str | None = None
     gripper: dict[str, Any] = field(default_factory=dict)
+    gripper_initial_logstd: float = -1.0
+    gripper_logstd_range: list[float] = field(default_factory=lambda: [-4.0, 0.0])
 
 
 class SplitGripperPolicy(ResidualPolicy):
-    """Joint PPO distribution: tanh-Gaussian arm and Bernoulli gripper."""
+    """Joint PPO with tanh-Gaussian arm and binary or scalar gripper control."""
 
     def __init__(self, cfg: SplitGripperConfig) -> None:
         if cfg.action_dim != 7 or list(cfg.residual_action_indices) != list(range(6)):
@@ -51,6 +54,18 @@ class SplitGripperPolicy(ResidualPolicy):
             raise ValueError("Gripper state input must match residual proprioception.")
         super().__init__(cfg)
         self.gripper = GripperCNN(gripper_cfg)
+        if gripper_cfg.output_mode == "scalar":
+            bounds = cfg.gripper_logstd_range
+            initial = float(cfg.gripper_initial_logstd)
+            if (
+                len(bounds) != 2
+                or not all(math.isfinite(value) for value in (*bounds, initial))
+                or not bounds[0] <= initial <= bounds[1]
+            ):
+                raise ValueError(
+                    "gripper_initial_logstd must lie in gripper_logstd_range."
+                )
+            self.gripper_logstd = torch.nn.Parameter(torch.tensor([[initial]]))
         if cfg.gripper_checkpoint:
             self.gripper.load_bc(cfg.gripper_checkpoint)
 
@@ -72,10 +87,27 @@ class SplitGripperPolicy(ResidualPolicy):
             obs["states"] = inputs["states"][:, -self.gripper.cfg.state_dim :]
         return obs
 
-    def _gripper_distribution(self, logits: torch.Tensor) -> Bernoulli:
-        """Use the same binary-action temperature as the seven-axis CNN."""
+    def _gripper_distribution(self, logits: torch.Tensor) -> Bernoulli | Normal:
+        """Build the binary distribution or the scalar's latent Gaussian."""
+        if self.gripper.cfg.output_mode == "scalar":
+            low, high = self.residual_cfg.gripper_logstd_range
+            std = self.gripper_logstd.clamp(low, high).exp().expand_as(logits)
+            return Normal(logits, std)
         return Bernoulli(
             logits=logits / float(self.residual_cfg.binary_action_temperature)
+        )
+
+    def _gripper_statistics(
+        self, logits: torch.Tensor, action: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        distribution = self._gripper_distribution(logits)
+        if self.gripper.cfg.output_mode == "scalar":
+            return self._continuous_action_statistics(
+                logits, distribution.stddev, action
+            )
+        return (
+            distribution.log_prob((action > 0).to(logits.dtype)),
+            distribution.entropy(),
         )
 
     def default_forward(
@@ -84,24 +116,19 @@ class SplitGripperPolicy(ResidualPolicy):
         """Recompute both distributions on the exact actions saved at rollout."""
         result = super().default_forward(forward_inputs=forward_inputs, **kwargs)
         if "logprobs" in result or "entropy" in result:
-            distribution = self._gripper_distribution(
-                self.gripper(self._gripper_obs(forward_inputs))
+            logprobs, gripper_entropy = self._gripper_statistics(
+                self.gripper(self._gripper_obs(forward_inputs)),
+                forward_inputs["action"][..., 6:7],
             )
             if "logprobs" in result:
-                action = forward_inputs["action"][..., 6:7]
                 result["logprobs"] = torch.cat(
-                    (
-                        result["logprobs"][..., :6],
-                        distribution.log_prob(
-                            (action > 0).to(distribution.logits.dtype)
-                        ),
-                    ),
+                    (result["logprobs"][..., :6], logprobs),
                     -1,
                 )
             if "entropy" in result:
                 entropy = result["entropy"].reshape(-1, 1, 7)
                 result["entropy"] = torch.cat(
-                    (entropy[..., :6], distribution.entropy().unsqueeze(1)), -1
+                    (entropy[..., :6], gripper_entropy.unsqueeze(1)), -1
                 )
         return result
 
@@ -109,7 +136,7 @@ class SplitGripperPolicy(ResidualPolicy):
     def predict_action_batch(
         self, env_obs: dict[str, torch.Tensor], **kwargs: Any
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Sample a binary gripper for PPO; use its mode during evaluation."""
+        """Save the sampled gripper command before environment thresholding."""
         if kwargs.get("return_obs", True) is False:
             raise ValueError("Split gripper requires return_obs=True for PPO replay.")
         actions, result = super().predict_action_batch(env_obs, **kwargs)
@@ -121,12 +148,21 @@ class SplitGripperPolicy(ResidualPolicy):
         }
         logits = self.gripper(gripper_inputs)
         distribution = self._gripper_distribution(logits)
-        binary = (
-            distribution.sample()
-            if kwargs.get("mode", "train") == "train"
-            else (logits >= 0).to(logits)
-        )
-        command = binary * 2 - 1
+        if self.gripper.cfg.output_mode == "scalar":
+            latent = (
+                distribution.sample()
+                if kwargs.get("mode", "train") == "train"
+                else logits
+            )
+            command = torch.tanh(latent)
+        else:
+            binary = (
+                distribution.sample()
+                if kwargs.get("mode", "train") == "train"
+                else (logits >= 0).to(logits)
+            )
+            command = binary * 2 - 1
+        logprobs, _ = self._gripper_statistics(logits, command)
         actions = torch.cat((actions[..., :6], command.to(actions).unsqueeze(1)), -1)
         inputs["action"] = torch.cat(
             (inputs["action"][..., :6], command.to(inputs["action"])), -1
@@ -134,7 +170,7 @@ class SplitGripperPolicy(ResidualPolicy):
         result["prev_logprobs"] = torch.cat(
             (
                 result["prev_logprobs"][..., :6],
-                distribution.log_prob(binary).to(result["prev_logprobs"]),
+                logprobs.to(result["prev_logprobs"]),
             ),
             -1,
         )

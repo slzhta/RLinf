@@ -198,6 +198,22 @@ def test_base_checkpoint_resolves_on_rollout_host(monkeypatch, tmp_path):
     assert all(not p.requires_grad for p in base.parameters())
 
 
+def test_gripper_checkpoint_resolves_on_loading_host(monkeypatch, tmp_path):
+    from rlinf.models.embodiment.residual_policy.gripper_cnn import (
+        GripperCNN,
+        GripperCNNConfig,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    source = GripperCNN(GripperCNNConfig())
+    source.save_bc(tmp_path / "gripper.pt")
+    loaded = GripperCNN(GripperCNNConfig())
+    loaded.load_bc("~/gripper.pt")
+    for key, value in source.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[key], value)
+
+
 def composed_config(monkeypatch):
     root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("EMBODIED_PATH", str(root / "examples/embodiment"))

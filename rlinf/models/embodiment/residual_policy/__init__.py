@@ -25,8 +25,20 @@ def get_model(
         ResidualPolicy,
     )
 
-    mode = cfg.get("gripper_mode", "residual")
+    mode = cfg.get("gripper_mode", "cnn")
     if mode == "cnn":
+        architecture = cfg.get("gripper_architecture", "shared")
+        if architecture == "shared":
+            from rlinf.models.embodiment.residual_policy.shared_gripper_policy import (
+                SharedGripperConfig,
+                SharedGripperPolicy,
+            )
+
+            model_config = SharedGripperConfig()
+            model_config.update_from_dict(OmegaConf.to_container(cfg, resolve=True))
+            return SharedGripperPolicy(model_config)
+        if architecture != "independent":
+            raise ValueError(f"Unsupported gripper_architecture: {architecture}")
         from rlinf.models.embodiment.residual_policy.split_gripper_policy import (
             SplitGripperConfig,
             SplitGripperPolicy,

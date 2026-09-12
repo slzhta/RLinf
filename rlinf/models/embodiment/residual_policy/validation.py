@@ -84,10 +84,27 @@ def validate_residual_cfg(cfg: DictConfig) -> None:
         )
     active = list(model.residual_action_indices)
     scale = list(model.residual_action_scale)
-    gripper_mode = model.get("gripper_mode", "residual")
+    gripper_mode = model.get("gripper_mode", "cnn")
     if gripper_mode not in ("residual", "cnn"):
         raise ValueError("gripper_mode must be residual or cnn.")
     if gripper_mode == "cnn":
+        architecture = model.get("gripper_architecture", "shared")
+        if architecture not in ("shared", "independent"):
+            raise ValueError("gripper_architecture must be shared or independent.")
+        if architecture == "shared":
+            if model.get("gripper"):
+                raise ValueError(
+                    "Shared gripper does not use the independent gripper config. "
+                    "Remove it or select gripper_architecture=independent."
+                )
+            if not model.get("independent_std", True):
+                raise ValueError("Shared gripper requires independent_std=true.")
+            if model.get("gripper_checkpoint") and not model.get(
+                "shared_feature_checkpoint"
+            ):
+                raise ValueError(
+                    "Shared gripper BC requires shared_feature_checkpoint."
+                )
         if model.action_dim != 7 or active != list(range(6)):
             raise ValueError(
                 "CNN gripper requires exactly six arm residual dimensions."
@@ -160,14 +177,22 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         )
     if model.state_dim != 14 or model.image_num != 2:
         raise ValueError("Rollout-side residual requires two views and 14-D states.")
-    if model.gripper.get("state_dim") != 14:
+    if (
+        model.get("gripper_architecture", "shared") == "independent"
+        and model.get("gripper", {}).get("state_dim") != 14
+    ):
         raise ValueError("CNN gripper must also receive the 14-D proprioceptive state.")
     if model.get("state_mean") or model.get("state_std"):
         raise ValueError(
             "Do not apply 14-D CNN normalization to the augmented residual state."
         )
-    if cfg.cluster.num_nodes != 3 or cfg.rollout.pipeline_stage_num != 1:
-        raise ValueError("Rollout-side residual requires three nodes and one stage.")
+    co_training = cfg.algorithm.get("sim_real_rl_co_training", False)
+    simulation_only = not co_training and cfg.env.train.env_type == "maniskill"
+    expected_nodes = 1 if simulation_only else 3
+    if cfg.cluster.num_nodes != expected_nodes or cfg.rollout.pipeline_stage_num != 1:
+        raise ValueError(
+            f"Rollout-side residual requires {expected_nodes} nodes and one stage."
+        )
     if cfg.algorithm.get("bootstrap_type") != "none":
         raise ValueError(
             "Rollout-side residual currently requires bootstrap_type=none."
@@ -182,13 +207,15 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         )
     if cfg.actor.get("sync_weight_no_wait", False):
         raise ValueError("Use the existing PPO weight synchronization barrier.")
-    co_training = cfg.algorithm.get("sim_real_rl_co_training", False)
     if (
         co_training
         and cfg.algorithm.get("co_training_rollout_routing_mode") != "paired"
     ):
         raise ValueError("Rollout-side residual co-training requires paired routing.")
     for domain in (cfg.env.train, cfg.env.eval):
+        if simulation_only:
+            _validate_simulation_contract(domain)
+            continue
         real = domain.co_training_env_cfg if co_training else domain
         if (
             real.env_type != "realworld"
@@ -223,28 +250,7 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
                 "Do not enable an env-side residual wrapper with rollout composition."
             )
         if co_training:
-            if domain.env_type != "maniskill" or domain.num_workers != 1:
-                raise ValueError(
-                    "Use one ManiSkill worker paired with one simulation rollout."
-                )
-            if (
-                not domain.include_states_in_obs
-                or not domain.auto_reset
-                or domain.get("enable_offload", False)
-            ):
-                raise ValueError(
-                    "Simulation requires states, auto reset, and no offload."
-                )
-            if domain.init_params.control_mode != "pd_ee_body_target_delta_pose_real":
-                raise ValueError(
-                    "Simulation must use the normalized PnP delta controller."
-                )
-            validate_success_only_reward_cfg(domain)
-            control = domain.init_params.controller_alignment
-            if not control.binary_gripper_action or control.use_zero_one_gripper_action:
-                raise ValueError("Simulation requires binary +/-1 gripper commands.")
-            if control.open_command != 1.0 or control.close_command != -1.0:
-                raise ValueError("Gripper convention must be -1 close, +1 open.")
+            _validate_simulation_contract(domain)
     base = cfg.base_model
     if (
         base.model_type != "openpi"
@@ -256,3 +262,26 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         base.num_action_chunks, base.openpi.action_chunk, base.openpi.action_horizon
     ):
         raise ValueError("base_horizon exceeds the base model horizon.")
+
+
+def _validate_simulation_contract(domain: DictConfig) -> None:
+    if domain.env_type != "maniskill" or domain.num_workers != 1:
+        raise ValueError("Use one ManiSkill worker paired with one simulation rollout.")
+    if domain.get("residual"):
+        raise ValueError(
+            "Do not enable an env-side residual wrapper with rollout composition."
+        )
+    if (
+        not domain.include_states_in_obs
+        or not domain.auto_reset
+        or domain.get("enable_offload", False)
+    ):
+        raise ValueError("Simulation requires states, auto reset, and no offload.")
+    if domain.init_params.control_mode != "pd_ee_body_target_delta_pose_real":
+        raise ValueError("Simulation must use the normalized PnP delta controller.")
+    validate_success_only_reward_cfg(domain)
+    control = domain.init_params.controller_alignment
+    if not control.binary_gripper_action or control.use_zero_one_gripper_action:
+        raise ValueError("Simulation requires binary +/-1 gripper commands.")
+    if control.open_command != 1.0 or control.close_command != -1.0:
+        raise ValueError("Gripper convention must be -1 close, +1 open.")

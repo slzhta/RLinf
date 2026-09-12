@@ -107,7 +107,7 @@ class BaseActionCache:
         current = self.actions[
             torch.arange(len(self.position), device=self.actions.device), self.position
         ]
-        if gripper_mode not in ("residual", "cnn"):
+        if gripper_mode not in ("residual", "cnn", "cnn_scalar"):
             raise ValueError(f"Unsupported gripper_mode: {gripper_mode}")
         if gripper_mode == "cnn" and (
             residual.shape[-1] != 7 or not (residual[:, 6].abs() == 1).all()
@@ -115,8 +115,12 @@ class BaseActionCache:
             raise ValueError(
                 "CNN gripper requires seven actions with a binary +/-1 command."
             )
+        if gripper_mode == "cnn_scalar" and (
+            residual.shape[-1] != 7 or (residual[:, 6].abs() > 1).any()
+        ):
+            raise ValueError("Scalar CNN gripper requires a command in [-1, 1].")
         executed = (current + scale * residual.clamp(-1.0, 1.0)).clamp(-1.0, 1.0)
-        if gripper_mode == "cnn":
+        if gripper_mode in ("cnn", "cnn_scalar"):
             executed[:, 6] = residual[:, 6]
         self.position += 1
         return executed

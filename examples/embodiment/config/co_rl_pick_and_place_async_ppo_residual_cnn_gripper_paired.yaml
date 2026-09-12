@@ -229,6 +229,7 @@ actor:
     - 0.4
     - 0.0
     gripper_mode: cnn
+    gripper_architecture: independent
     gripper_checkpoint: ${checkpoints.gripper}
     gripper:
       image_num: 2
@@ -274,5 +275,5 @@ base_model:
     discrete_state_input: false
 checkpoints:
   openpi: ~/wangyinghan/models/pi05_pnp_sim500_real250_success_20260905_nostate_10k
-  encoder: ???
-  gripper: ???
+  encoder: /mnt/RLinf
+  gripper: ~/shiliangzhi/co-training/pretrained-model/pnp_gripper_bc_mixed_20260910_best.pt

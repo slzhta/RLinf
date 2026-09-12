@@ -1,7 +1,7 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Independent binary gripper policy shared by offline BC and online PPO."""
+"""Independent gripper head shared by offline BC and online PPO."""
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,10 +19,11 @@ class GripperCNNConfig:
     image_size: int = 96
     state_dim: int = 14
     hidden_dim: int = 128
+    output_mode: str = "bernoulli"
 
 
 class GripperCNN(nn.Module):
-    """Predict an open-command logit from RGB views and optional proprioception.
+    """Predict a binary logit or a scalar pre-tanh mean from RGB and state.
 
     Images are NHWC RGB uint8 (or floats in [0, 255]) in both BC and PPO.
     There is no OpenPI input, Gaussian noise, dropout or running batch statistic.
@@ -35,6 +36,8 @@ class GripperCNN(nn.Module):
             raise ValueError("Invalid gripper image/state dimensions.")
         if cfg.hidden_dim < 1:
             raise ValueError("gripper hidden_dim must be positive.")
+        if cfg.output_mode not in ("bernoulli", "scalar"):
+            raise ValueError("gripper output_mode must be bernoulli or scalar.")
         self.cfg = cfg
         layers = []
         channels = 3
@@ -56,7 +59,7 @@ class GripperCNN(nn.Module):
         )
 
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Return [B, 1] Bernoulli logits using the saved observation contract."""
+        """Return [B, 1] logits or pre-tanh means using the saved input contract."""
         main = obs["main_images"]
         if main.ndim != 4 or main.shape[-1] != 3:
             raise ValueError("Gripper main_images must be NHWC RGB.")
@@ -100,10 +103,14 @@ class GripperCNN(nn.Module):
 
     def load_bc(self, path: str | Path) -> None:
         """Reject incompatible BC checkpoints instead of silently reinitializing."""
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        checkpoint = torch.load(
+            Path(path).expanduser(), map_location="cpu", weights_only=True
+        )
+        saved_config = dict(checkpoint.get("config", {}))
+        saved_config.setdefault("output_mode", "bernoulli")
         if (
             checkpoint.get("format_version") != 1
-            or checkpoint.get("config") != asdict(self.cfg)
+            or saved_config != asdict(self.cfg)
             or checkpoint.get("action_convention") != "minus_one_close_plus_one_open"
         ):
             raise ValueError("Gripper BC checkpoint configuration/convention mismatch.")

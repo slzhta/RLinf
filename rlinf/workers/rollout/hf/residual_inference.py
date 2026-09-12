@@ -86,5 +86,10 @@ class RolloutResidualInference:
         actions = torch.as_tensor(actions, device=self.device)
         if actions.shape != (batch_size, 1, 7):
             raise ValueError("Residual rollout requires one seven-dimensional action.")
-        executed = cache.compose(actions[:, 0], self.scale, gripper_mode="cnn")
+        gripper_mode = (
+            "cnn_scalar"
+            if self.cfg.actor.model.get("gripper", {}).get("output_mode") == "scalar"
+            else "cnn"
+        )
+        executed = cache.compose(actions[:, 0], self.scale, gripper_mode=gripper_mode)
         return executed.unsqueeze(1), result

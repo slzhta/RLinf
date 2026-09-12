@@ -13,12 +13,19 @@ base_horizon: 10
 
 image_num: 2
 image_size: [3, 128, 128]
-use_state: false
+use_state: true
 state_dim: 14
 state_mean: []
 state_std: []
 encoder_config:
   dropout: 0.0
+
+gripper_mode: cnn
+gripper_architecture: shared
+action_latent_dim: 64
+gripper_hidden_dim: 128
+shared_feature_checkpoint: null
+gripper_checkpoint: null
 
 residual_action_indices: [0, 1, 2, 3, 4, 5]
 residual_action_scale: [0.3, 0.3, 0.3, 0.1, 0.1, 0.3, 0.0]
