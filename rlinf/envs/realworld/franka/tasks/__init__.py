@@ -68,3 +68,8 @@ register(
     id="FrankaCoTrainingPegInsertionEnv-v1",
     entry_point="rlinf.envs.realworld.franka.tasks.co_training_peg_insertion_env:FrankaCoTrainingPegInsertionEnv",
 )
+
+register(
+    id="FrankaCoTrainingPourWaterEnv-v1",
+    entry_point="rlinf.envs.realworld.franka.tasks.pour_water_env:FrankaCoTrainingPourWaterEnv",
+)

@@ -28,6 +28,7 @@ from rlinf.envs.maniskill.tasks.digital_twin.peg_insertion import (
 from rlinf.envs.maniskill.tasks.digital_twin.pick_and_place import (
     PickAndPlaceDigitalTwinEnv,
 )
+from rlinf.envs.maniskill.tasks.digital_twin.pour_water import PourWaterDigitalTwinEnv
 from rlinf.envs.maniskill.tasks.digital_twin.push_button import PushButtonEnv
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "PickAndPlaceDigitalTwinEnv",
     "PushButtonEnv",
     "PegInsertionDigitalTwinEnv",
+    "PourWaterDigitalTwinEnv",
 ]
