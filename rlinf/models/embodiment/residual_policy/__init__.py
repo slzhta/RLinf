@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 import torch
 from omegaconf import DictConfig, OmegaConf
 
@@ -25,9 +27,16 @@ def get_model(
         ResidualPolicy,
     )
 
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    if cfg.get("model_path"):
+        cfg.model_path = str(Path(cfg.model_path).expanduser())
     mode = cfg.get("gripper_mode", "cnn")
-    if mode == "cnn":
+    if mode in ("cnn", "none"):
         architecture = cfg.get("gripper_architecture", "shared")
+        if mode == "none" and architecture != "shared":
+            raise ValueError(
+                "No-gripper residual requires the shared feature architecture."
+            )
         if architecture == "shared":
             from rlinf.models.embodiment.residual_policy.shared_gripper_policy import (
                 SharedGripperConfig,

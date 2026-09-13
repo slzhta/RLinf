@@ -1,7 +1,7 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared CNN/state features with separate arm and Bernoulli gripper heads."""
+"""Separate RGB/state/action features with an optional Bernoulli gripper head."""
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -35,13 +35,24 @@ class SharedGripperConfig(ResidualConfig):
 
 
 class SharedGripperPolicy(CNNPolicy):
-    """Use native CNN PPO statistics for six residuals and one binary action."""
+    """Use native CNN PPO statistics for six residuals and an optional gripper."""
 
     def __init__(self, cfg: SharedGripperConfig) -> None:
+        if cfg.gripper_mode not in ("cnn", "none"):
+            raise ValueError("Shared feature policy supports cnn or none gripper mode.")
+        self.has_gripper = cfg.gripper_mode == "cnn"
+        if not self.has_gripper and (
+            not cfg.gripper_share_features
+            or cfg.gripper_checkpoint
+            or cfg.shared_feature_checkpoint
+        ):
+            raise ValueError(
+                "No-gripper policy does not load gripper BC or separate gripper features."
+            )
         if not isinstance(cfg.gripper_share_features, bool):
             raise ValueError("gripper_share_features must be a boolean.")
         if (
-            cfg.action_dim != 7
+            cfg.action_dim != (7 if self.has_gripper else 6)
             or list(cfg.residual_action_indices) != list(range(6))
             or cfg.num_action_chunks != 1
             or not cfg.add_value_head
@@ -62,7 +73,7 @@ class SharedGripperPolicy(CNNPolicy):
             raise ValueError(
                 "Shared gripper requires 128px CNN PPO, state input, six arm "
                 "residuals, one action chunk, a value head and independent std. "
-                "Leave binary_action_indices empty; the policy sets channel 6."
+                "Leave binary_action_indices empty; gripper_mode selects the binary head."
             )
         if cfg.gripper:
             raise ValueError(
@@ -73,7 +84,7 @@ class SharedGripperPolicy(CNNPolicy):
         if cfg.encoder_config.get("dropout", 0.0) != 0.0:
             raise ValueError("Shared gripper requires encoder dropout=0 for PPO.")
         cnn_cfg = deepcopy(cfg)
-        cnn_cfg.binary_action_indices = [6]
+        cnn_cfg.binary_action_indices = [6] if self.has_gripper else []
         cnn_cfg.encoder_config.setdefault("dropout", 0.0)
         cnn_cfg.encoder_config.setdefault("freeze_backbone", False)
         super().__init__(cnn_cfg)
@@ -102,12 +113,16 @@ class SharedGripperPolicy(CNNPolicy):
         self.actor_mean = nn.Linear(256, 6)
         nn.init.zeros_(self.actor_mean.weight)
         nn.init.zeros_(self.actor_mean.bias)
-        self.gripper_head = nn.Sequential(
-            nn.Linear(feature_dim, cfg.gripper_hidden_dim),
-            nn.Tanh(),
-            nn.Linear(cfg.gripper_hidden_dim, 1),
-        )
-        for module in (self.action_proj, self.mix_proj, self.gripper_head):
+        if self.has_gripper:
+            self.gripper_head = nn.Sequential(
+                nn.Linear(feature_dim, cfg.gripper_hidden_dim),
+                nn.Tanh(),
+                nn.Linear(cfg.gripper_hidden_dim, 1),
+            )
+        modules = [self.action_proj, self.mix_proj]
+        if self.has_gripper:
+            modules.append(self.gripper_head)
+        for module in modules:
             init_mlp_weights(module, nonlinearity="tanh")
         if not cfg.gripper_share_features:
             self.gripper_encoders = deepcopy(self.encoders)
@@ -120,7 +135,8 @@ class SharedGripperPolicy(CNNPolicy):
 
     def _prepare_cnn_obs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         base = obs["base_actions"].clone()
-        base[..., 6] = 0
+        if self.has_gripper:
+            base[..., 6] = 0
         return ResidualPolicy._prepare_cnn_obs(self, {**obs, "base_actions": base})
 
     def _actor_forward_from_processed_tensors(
@@ -130,31 +146,38 @@ class SharedGripperPolicy(CNNPolicy):
         extra_view_images: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         horizon = self.residual_cfg.base_horizon
+        action_dim = self.residual_cfg.action_dim
+        plan_end = horizon * action_dim
+        condition_end = plan_end + horizon
         if (
             states is None
             or states.ndim != 2
-            or states.shape[1] != horizon * 8 + self.cfg.state_dim
+            or states.shape[1] != condition_end + self.cfg.state_dim
         ):
             raise ValueError("PPO replay requires the saved base plan, mask and state.")
-        plan = states[:, : horizon * 7].reshape(-1, horizon, 7)
-        mask = states[:, horizon * 7 : horizon * 8]
+        plan = states[:, :plan_end].reshape(-1, horizon, action_dim)
+        mask = states[:, plan_end:condition_end]
         action_input = torch.cat(
             ((plan[..., :6] * mask.unsqueeze(-1)).flatten(1), mask), dim=1
         )
         shared, _ = self._get_feature_from_processed_tensors(
-            main_images, states[:, horizon * 8 :], extra_view_images
+            main_images, states[:, condition_end:], extra_view_images
         )
         full_feature = torch.cat((shared, self.action_proj(action_input)), dim=1)
         mix_feature = self.mix_proj(full_feature)
         arm_mean = self.actor_mean(mix_feature)
-        gripper_feature = (
-            shared
-            if self.cfg.gripper_share_features
-            else self._get_gripper_feature(
-                main_images, states[:, horizon * 8 :], extra_view_images
+        action_mean = arm_mean
+        if self.has_gripper:
+            gripper_feature = (
+                shared
+                if self.cfg.gripper_share_features
+                else self._get_gripper_feature(
+                    main_images, states[:, condition_end:], extra_view_images
+                )
             )
-        )
-        action_mean = torch.cat((arm_mean, self.gripper_head(gripper_feature)), dim=-1)
+            action_mean = torch.cat(
+                (arm_mean, self.gripper_head(gripper_feature)), dim=-1
+            )
         action_logstd = self.actor_logstd.expand_as(action_mean)
         return full_feature, mix_feature, action_mean, action_logstd
 
@@ -172,7 +195,7 @@ class SharedGripperPolicy(CNNPolicy):
     ) -> dict[str, torch.Tensor]:
         result = super().default_forward(forward_inputs, **kwargs)
         if "entropy" in result:
-            result["entropy"] = result["entropy"].reshape(-1, 1, 7)
+            result["entropy"] = result["entropy"].reshape(-1, 1, self.cfg.action_dim)
         return result
 
     @torch.no_grad()
@@ -227,6 +250,8 @@ class SharedGripperPolicy(CNNPolicy):
 
     def gripper_bc_logits(self, env_obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Run only shared RGB/state features and the head; no OpenPI is needed."""
+        if not self.has_gripper:
+            raise ValueError("No-gripper policy has no gripper BC head.")
         if (
             env_obs["states"].ndim != 2
             or env_obs["states"].shape[1] != self.cfg.state_dim
@@ -242,6 +267,8 @@ class SharedGripperPolicy(CNNPolicy):
 
     def set_gripper_bc_mode(self, train_shared_features: bool = False) -> None:
         """Train the gripper, optionally including its RGB/state frontend."""
+        if not self.has_gripper:
+            raise ValueError("No-gripper policy has no gripper BC head.")
         self._shared_feature_id = (
             None if train_shared_features else self._shared_feature_id
         )

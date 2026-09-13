@@ -84,12 +84,17 @@ class RolloutResidualInference:
             # sent at the start of the next epoch; its base action is unconsumed.
             return actions, result
         actions = torch.as_tensor(actions, device=self.device)
-        if actions.shape != (batch_size, 1, 7):
-            raise ValueError("Residual rollout requires one seven-dimensional action.")
-        gripper_mode = (
-            "cnn_scalar"
-            if self.cfg.actor.model.get("gripper", {}).get("output_mode") == "scalar"
-            else "cnn"
-        )
+        if actions.shape != (batch_size, 1, self.cfg.actor.model.action_dim):
+            raise ValueError(
+                "Residual rollout requires one action matching action_dim."
+            )
+        gripper_mode = self.cfg.actor.model.get("gripper_mode", "cnn")
+        if gripper_mode == "none":
+            gripper_mode = "residual"
+        elif (
+            gripper_mode == "cnn"
+            and self.cfg.actor.model.get("gripper", {}).get("output_mode") == "scalar"
+        ):
+            gripper_mode = "cnn_scalar"
         executed = cache.compose(actions[:, 0], self.scale, gripper_mode=gripper_mode)
         return executed.unsqueeze(1), result

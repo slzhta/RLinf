@@ -85,8 +85,29 @@ def validate_residual_cfg(cfg: DictConfig) -> None:
     active = list(model.residual_action_indices)
     scale = list(model.residual_action_scale)
     gripper_mode = model.get("gripper_mode", "cnn")
-    if gripper_mode not in ("residual", "cnn"):
-        raise ValueError("gripper_mode must be residual or cnn.")
+    if gripper_mode not in ("residual", "cnn", "none"):
+        raise ValueError("gripper_mode must be residual, cnn or none.")
+    if gripper_mode == "none":
+        if (
+            model.action_dim != 6
+            or active != list(range(6))
+            or model.get("gripper_architecture", "shared") != "shared"
+            or not model.get("gripper_share_features", True)
+            or model.get("gripper_checkpoint")
+            or model.get("shared_feature_checkpoint")
+            or model.get("gripper")
+            or model.get("binary_action_indices")
+            or not model.get("independent_std", True)
+        ):
+            raise ValueError(
+                "No-gripper residual requires six continuous actions and no gripper BC."
+            )
+        if cfg.algorithm.logprob_type != "chunk_level":
+            raise ValueError("No-gripper residual requires joint chunk_level logprobs.")
+        if cfg.rollout.get("enable_cuda_graph", False) or cfg.rollout.get(
+            "enable_torch_compile", False
+        ):
+            raise ValueError("Keep residual rollout compile and CUDA graphs disabled.")
     if gripper_mode == "cnn":
         architecture = model.get("gripper_architecture", "shared")
         if architecture not in ("shared", "independent"):
@@ -178,12 +199,15 @@ def validate_residual_cfg(cfg: DictConfig) -> None:
 
 def _validate_rollout_contract(cfg: DictConfig) -> None:
     model = cfg.actor.model
-    if model.get("gripper_mode") != "cnn" or not model.use_state:
+    peg = model.get("gripper_mode") == "none"
+    if model.get("gripper_mode") not in ("cnn", "none") or not model.use_state:
         raise ValueError(
             "Rollout-side residual requires CNN gripper and proprioception."
         )
-    if model.state_dim != 14 or model.image_num != 2:
-        raise ValueError("Rollout-side residual requires two views and 14-D states.")
+    if (model.state_dim, model.image_num) != ((6, 1) if peg else (14, 2)):
+        raise ValueError(
+            "Use wrist/6-D state for Peg, or two views/14-D state for PnP."
+        )
     if (
         model.get("gripper_architecture", "shared") == "independent"
         and model.get("gripper", {}).get("state_dim") != 14
@@ -221,7 +245,7 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         raise ValueError("Rollout-side residual co-training requires paired routing.")
     for domain in (cfg.env.train, cfg.env.eval):
         if simulation_only:
-            _validate_simulation_contract(domain)
+            _validate_simulation_contract(domain, peg=peg)
             continue
         real = domain.co_training_env_cfg if co_training else domain
         if (
@@ -230,11 +254,16 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
             or real.num_workers != 1
         ):
             raise ValueError("Use one realworld environment and one real worker.")
-        if list(real.get("state_keys", [])) != [
-            "arm_joint_position",
-            "tcp_pose",
-            "gripper_open_state",
-        ]:
+        expected_state_keys = (
+            ["ee_target_delta"]
+            if peg
+            else [
+                "arm_joint_position",
+                "tcp_pose",
+                "gripper_open_state",
+            ]
+        )
+        if list(real.get("state_keys", [])) != expected_state_keys:
             raise ValueError(
                 "Real state_keys must match the joint/pose/gripper BC order."
             )
@@ -242,8 +271,16 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
             raise ValueError(
                 "Residual PPO does not support intervention action relabeling."
             )
-        if real.get("keyboard_reward_wrapper") != "pnp_human":
-            raise ValueError("Reuse the CNN PnP human reward/reset wrapper.")
+        if real.get("keyboard_reward_wrapper") != (None if peg else "pnp_human"):
+            raise ValueError(
+                "Use automatic Peg success or the PnP human reward wrapper."
+            )
+        if peg and (
+            real.init_params.id != "FrankaCoTrainingPegInsertionEnv-v1"
+            or real.get("main_image_key") != "wrist_1"
+            or real.override_cfg.peg_config.get("dense_reward_scale", 0.1) != 0.0
+        ):
+            raise ValueError("Peg requires its wrist environment and sparse rewards.")
         if (
             not real.include_states_in_obs
             or not real.auto_reset
@@ -257,21 +294,32 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
                 "Do not enable an env-side residual wrapper with rollout composition."
             )
         if co_training:
-            _validate_simulation_contract(domain)
+            _validate_simulation_contract(domain, peg=peg)
     base = cfg.base_model
     if (
         base.model_type != "openpi"
-        or base.action_dim != 7
+        or base.action_dim != (6 if peg else 7)
         or base.openpi.get("use_dsrl", False)
     ):
-        raise ValueError("Use a frozen seven-dimensional OpenPI SFT base.")
+        raise ValueError(
+            "Use a frozen OpenPI SFT base matching the task action dimensions."
+        )
+    if peg and (
+        base.openpi.config_name != "pi05_peg_wrist_state"
+        or base.openpi.action_env_dim != 6
+        or base.openpi.num_images_in_input != 1
+        or not base.openpi.get("discrete_state_input", False)
+    ):
+        raise ValueError(
+            "Peg SFT requires its wrist/state adapter and six-axis outputs."
+        )
     if model.base_horizon > min(
         base.num_action_chunks, base.openpi.action_chunk, base.openpi.action_horizon
     ):
         raise ValueError("base_horizon exceeds the base model horizon.")
 
 
-def _validate_simulation_contract(domain: DictConfig) -> None:
+def _validate_simulation_contract(domain: DictConfig, *, peg: bool = False) -> None:
     if domain.env_type != "maniskill" or domain.num_workers != 1:
         raise ValueError("Use one ManiSkill worker paired with one simulation rollout.")
     if domain.get("residual"):
@@ -286,6 +334,20 @@ def _validate_simulation_contract(domain: DictConfig) -> None:
         raise ValueError("Simulation requires states, auto reset, and no offload.")
     if domain.init_params.control_mode != "pd_ee_body_target_delta_pose_real":
         raise ValueError("Simulation must use the normalized PnP delta controller.")
+    if peg:
+        if (
+            domain.init_params.id != "PegInsertionDigitalTwin-v1"
+            or domain.init_params.reward_mode != "dense"
+            or domain.reward_mode != "raw"
+            or domain.use_rel_reward
+            or domain.ignore_terminations
+            or domain.init_params.get("peg_config", {}).get("dense_reward_scale", 0.1)
+            != 0.0
+        ):
+            raise ValueError(
+                "Peg residual requires its native success-only reward and terminations."
+            )
+        return
     validate_success_only_reward_cfg(domain)
     control = domain.init_params.controller_alignment
     if not control.binary_gripper_action or control.use_zero_one_gripper_action:
