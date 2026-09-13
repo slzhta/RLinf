@@ -184,6 +184,60 @@ def test_reject_wrong_frontend_and_legacy_head(policy, tmp_path):
         policy.load_gripper_bc(tmp_path / "old.pt")
 
 
+def test_full_gripper_bc_updates_only_frontend_and_head(policy, tmp_path):
+    obs = observation()
+    policy.set_gripper_bc_mode(train_shared_features=True)
+    prefixes = ("encoders.", "state_proj.", "gripper_head.")
+    assert all(
+        p.requires_grad == n.startswith(prefixes) for n, p in policy.named_parameters()
+    )
+    before = {k: v.clone() for k, v in policy.state_dict().items()}
+    optimizer = torch.optim.AdamW(
+        [p for p in policy.parameters() if p.requires_grad], lr=1e-3
+    )
+    target = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
+    F.binary_cross_entropy_with_logits(policy.gripper_bc_logits(obs), target).backward()
+    for module in [policy.encoders, policy.state_proj, policy.gripper_head]:
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters()
+        )
+    optimizer.step()
+    for prefix in prefixes:
+        assert any(
+            not torch.equal(before[k], v)
+            for k, v in policy.state_dict().items()
+            if k.startswith(prefix)
+        )
+    assert all(
+        torch.equal(before[k], v)
+        for k, v in policy.state_dict().items()
+        if not k.startswith(prefixes)
+    )
+    policy.eval()
+    feature_path, head_path = tmp_path / "features.pt", tmp_path / "head.pt"
+    policy.save_gripper_bc_pair(feature_path, head_path)
+    assert all(
+        p.requires_grad == n.startswith(prefixes) for n, p in policy.named_parameters()
+    )
+    with pytest.raises(ValueError, match="Save/load shared features"):
+        policy.save_gripper_bc(tmp_path / "stale_head.pt")
+    restored = SharedGripperPolicy(deepcopy(policy.residual_cfg)).eval()
+    untouched = {
+        k: v.clone()
+        for k, v in restored.state_dict().items()
+        if not k.startswith(prefixes)
+    }
+    restored.load_shared_features(feature_path)
+    restored.load_gripper_bc(head_path)
+    torch.testing.assert_close(
+        policy.gripper_bc_logits(obs), restored.gripper_bc_logits(obs)
+    )
+    assert all(torch.equal(restored.state_dict()[k], v) for k, v in untouched.items())
+    restored.set_rl_mode()
+    assert all(p.requires_grad for p in restored.parameters())
+    assert not any(e.freeze_backbone for e in restored.encoders)
+
+
 def test_factory_default_and_explicit_legacy(policy, monkeypatch):
     from dataclasses import asdict
 
@@ -202,3 +256,143 @@ def test_factory_default_and_explicit_legacy(policy, monkeypatch):
     cfg["gripper_architecture"] = "independent"
     monkeypatch.setattr(SplitGripperConfig, "_update_info", lambda self: None)
     assert isinstance(get_model(OmegaConf.create(cfg)), SplitGripperPolicy)
+
+
+def make_separate_policy(policy, tmp_path):
+    policy.set_gripper_bc_mode()
+    features, head = tmp_path / "features.pt", tmp_path / "head.pt"
+    policy.save_gripper_bc_pair(features, head)
+    cfg = deepcopy(policy.residual_cfg)
+    cfg.gripper_share_features = False
+    cfg.shared_feature_checkpoint = str(features)
+    cfg.gripper_checkpoint = str(head)
+    separate = SharedGripperPolicy(cfg)
+    result = separate.load_state_dict(policy.state_dict(), strict=False)
+    assert not result.unexpected_keys
+    assert all(
+        k.startswith(("gripper_encoders.", "gripper_state_proj."))
+        for k in result.missing_keys
+    )
+    separate.eval()
+    policy.set_rl_mode()
+    policy.eval()
+    return separate
+
+
+def test_separate_initial_outputs_and_checkpoint_roundtrip(policy, tmp_path):
+    separate = make_separate_policy(policy, tmp_path)
+    obs = observation()
+    for original, cloned in zip(
+        distribution_outputs(policy, obs), distribution_outputs(separate, obs)
+    ):
+        torch.testing.assert_close(original, cloned, rtol=0, atol=0)
+    for a, b in [
+        (policy.encoders, separate.gripper_encoders),
+        (separate.encoders, separate.gripper_encoders),
+        (separate.state_proj, separate.gripper_state_proj),
+    ]:
+        assert {p.data_ptr() for p in a.parameters()}.isdisjoint(
+            {p.data_ptr() for p in b.parameters()}
+        )
+    actions, rollout = separate.predict_action_batch(obs, mode="train")
+    replay = separate.default_forward(rollout["forward_inputs"])
+    torch.testing.assert_close(
+        replay["logprobs"], rollout["prev_logprobs"], atol=1e-5, rtol=1e-5
+    )
+    assert (actions[..., 6].abs() == 1).all()
+    with torch.no_grad():
+        separate.gripper_state_proj[0].weight.add_(0.25)
+    full = tmp_path / "full.pt"
+    torch.save(separate.state_dict(), full)
+    restored = SharedGripperPolicy(deepcopy(separate.residual_cfg)).eval()
+    restored.load_state_dict(torch.load(full, weights_only=True), strict=True)
+    torch.testing.assert_close(
+        restored.gripper_bc_logits(obs), separate.gripper_bc_logits(obs)
+    )
+    assert not torch.equal(
+        restored.state_proj[0].weight, restored.gripper_state_proj[0].weight
+    )
+    with pytest.raises(RuntimeError):
+        separate.load_state_dict(policy.state_dict(), strict=True)
+
+
+def test_value_gradient_isolated_but_ppo_updates_separate_gripper(policy, tmp_path):
+    separate = make_separate_policy(policy, tmp_path)
+    _, rollout = separate.predict_action_batch(observation(), mode="train")
+    result = separate.default_forward(rollout["forward_inputs"])
+    result["values"].square().mean().backward()
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in separate.encoders.parameters()
+    )
+    assert all(
+        p.grad is None
+        for n, p in separate.named_parameters()
+        if n.startswith("gripper_")
+    )
+    separate.zero_grad(set_to_none=True)
+    before = {k: v.clone() for k, v in separate.state_dict().items()}
+    replay = separate.default_forward(rollout["forward_inputs"])
+    advantage = torch.tensor([1.0, -1.0, 0.5, -0.5])
+    ratio = (replay["logprobs"][..., 6] - rollout["prev_logprobs"][..., 6]).exp()
+    loss = -(ratio * advantage).mean()
+    loss.backward()
+    for module in [
+        separate.gripper_encoders,
+        separate.gripper_state_proj,
+        separate.gripper_head,
+    ]:
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters()
+        )
+    assert all(
+        p.grad is None or p.grad.abs().sum() == 0
+        for n, p in separate.named_parameters()
+        if not n.startswith("gripper_")
+    )
+    torch.optim.AdamW(separate.parameters(), lr=1e-3, weight_decay=0).step()
+    assert any(
+        not torch.equal(v, separate.state_dict()[k])
+        for k, v in before.items()
+        if k.startswith("gripper_encoders.")
+    )
+    assert all(
+        torch.equal(v, separate.state_dict()[k])
+        for k, v in before.items()
+        if not k.startswith("gripper_")
+    )
+
+
+def test_separate_bc_trains_and_exports_only_gripper_copy(policy, tmp_path):
+    separate = make_separate_policy(policy, tmp_path)
+    separate.set_gripper_bc_mode(train_shared_features=True)
+    assert all(
+        p.requires_grad == n.startswith("gripper_")
+        for n, p in separate.named_parameters()
+    )
+    before = {k: v.clone() for k, v in separate.state_dict().items()}
+    obs = observation()
+    F.binary_cross_entropy_with_logits(
+        separate.gripper_bc_logits(obs), torch.ones(4, 1)
+    ).backward()
+    torch.optim.AdamW(
+        [p for p in separate.parameters() if p.requires_grad], lr=1e-3
+    ).step()
+    assert all(
+        torch.equal(v, separate.state_dict()[k])
+        for k, v in before.items()
+        if not k.startswith("gripper_")
+    )
+    separate.save_gripper_bc_pair(
+        tmp_path / "separate_features.pt", tmp_path / "separate_head.pt"
+    )
+    separate.eval()
+    restored = SharedGripperPolicy(deepcopy(separate.residual_cfg)).eval()
+    restored.load_shared_features(tmp_path / "separate_features.pt")
+    restored.load_gripper_bc(tmp_path / "separate_head.pt")
+    torch.testing.assert_close(
+        restored.gripper_bc_logits(obs), separate.gripper_bc_logits(obs)
+    )
+    separate.set_rl_mode()
+    assert all(p.requires_grad for p in separate.parameters())
+    assert not any(e.freeze_backbone for e in separate.gripper_encoders)

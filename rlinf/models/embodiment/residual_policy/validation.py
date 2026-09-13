@@ -91,6 +91,13 @@ def validate_residual_cfg(cfg: DictConfig) -> None:
         architecture = model.get("gripper_architecture", "shared")
         if architecture not in ("shared", "independent"):
             raise ValueError("gripper_architecture must be shared or independent.")
+        share_features = model.get("gripper_share_features", True)
+        if not isinstance(share_features, bool):
+            raise ValueError("gripper_share_features must be a boolean.")
+        if architecture != "shared" and not share_features:
+            raise ValueError(
+                "gripper_share_features=false requires gripper_architecture=shared."
+            )
         if architecture == "shared":
             if model.get("gripper"):
                 raise ValueError(

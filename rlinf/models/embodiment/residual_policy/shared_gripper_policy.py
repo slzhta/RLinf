@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.cnn_policy.cnn_policy import CNNPolicy
@@ -25,6 +26,7 @@ from rlinf.models.embodiment.residual_policy.residual_policy import (
 class SharedGripperConfig(ResidualConfig):
     gripper_mode: str = "cnn"
     gripper_architecture: str = "shared"
+    gripper_share_features: bool = True
     action_latent_dim: int = 64
     gripper_hidden_dim: int = 128
     shared_feature_checkpoint: str | None = None
@@ -36,6 +38,8 @@ class SharedGripperPolicy(CNNPolicy):
     """Use native CNN PPO statistics for six residuals and one binary action."""
 
     def __init__(self, cfg: SharedGripperConfig) -> None:
+        if not isinstance(cfg.gripper_share_features, bool):
+            raise ValueError("gripper_share_features must be a boolean.")
         if (
             cfg.action_dim != 7
             or list(cfg.residual_action_indices) != list(range(6))
@@ -105,6 +109,9 @@ class SharedGripperPolicy(CNNPolicy):
         )
         for module in (self.action_proj, self.mix_proj, self.gripper_head):
             init_mlp_weights(module, nonlinearity="tanh")
+        if not cfg.gripper_share_features:
+            self.gripper_encoders = deepcopy(self.encoders)
+            self.gripper_state_proj = deepcopy(self.state_proj)
         self._shared_feature_id: str | None = None
         if cfg.shared_feature_checkpoint:
             self.load_shared_features(cfg.shared_feature_checkpoint)
@@ -140,7 +147,14 @@ class SharedGripperPolicy(CNNPolicy):
         full_feature = torch.cat((shared, self.action_proj(action_input)), dim=1)
         mix_feature = self.mix_proj(full_feature)
         arm_mean = self.actor_mean(mix_feature)
-        action_mean = torch.cat((arm_mean, self.gripper_head(shared)), dim=-1)
+        gripper_feature = (
+            shared
+            if self.cfg.gripper_share_features
+            else self._get_gripper_feature(
+                main_images, states[:, horizon * 8 :], extra_view_images
+            )
+        )
+        action_mean = torch.cat((arm_mean, self.gripper_head(gripper_feature)), dim=-1)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         return full_feature, mix_feature, action_mean, action_logstd
 
@@ -183,6 +197,34 @@ class SharedGripperPolicy(CNNPolicy):
             actions[..., :6] = 0
         return actions, result
 
+    def _get_gripper_feature(
+        self,
+        main_images: torch.Tensor,
+        states: torch.Tensor,
+        extra_view_images: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.cfg.gripper_share_features:
+            feature, _ = self._get_feature_from_processed_tensors(
+                main_images, states, extra_view_images
+            )
+            return feature
+        features = []
+        for i, encoder in enumerate(self.gripper_encoders):
+            if i > 0 and extra_view_images is None:
+                raise ValueError(
+                    "Independent gripper features require all camera views."
+                )
+            images = main_images if i == 0 else extra_view_images[:, i - 1]
+            if images.shape[3] == 3:
+                images = images.permute(0, 3, 1, 2)
+            size = (self.cfg.encoder_input_size,) * 2
+            if images.shape[-2:] != size:
+                images = F.interpolate(
+                    images, size=size, mode="bilinear", align_corners=False
+                )
+            features.append(encoder(images))
+        return torch.cat((*features, self.gripper_state_proj(states)), dim=-1)
+
     def gripper_bc_logits(self, env_obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Run only shared RGB/state features and the head; no OpenPI is needed."""
         if (
@@ -193,15 +235,24 @@ class SharedGripperPolicy(CNNPolicy):
                 "BC requires original proprioception, not augmented state."
             )
         obs = self.preprocess_env_obs(env_obs)
-        shared, _ = self._get_feature_from_processed_tensors(
+        shared = self._get_gripper_feature(
             obs["main_images"], obs["states"], obs.get("extra_view_images")
         )
         return self.gripper_head(shared)
 
-    def set_gripper_bc_mode(self) -> None:
-        """Freeze the entire policy except the final gripper MLP."""
+    def set_gripper_bc_mode(self, train_shared_features: bool = False) -> None:
+        """Train the gripper, optionally including its RGB/state frontend."""
+        self._shared_feature_id = (
+            None if train_shared_features else self._shared_feature_id
+        )
         self.requires_grad_(False)
         self.eval()
+        if train_shared_features:
+            for encoder in self._feature_modules()["encoders"]:
+                encoder.freeze_backbone = False
+            for module in self._feature_modules().values():
+                module.requires_grad_(True)
+                module.train()
         self.gripper_head.requires_grad_(True)
         self.gripper_head.train()
 
@@ -210,6 +261,8 @@ class SharedGripperPolicy(CNNPolicy):
         self._shared_feature_id = None
         self.requires_grad_(True)
         for encoder in self.encoders:
+            encoder.freeze_backbone = False
+        for encoder in self._feature_modules()["encoders"]:
             encoder.freeze_backbone = False
         self.train()
 
@@ -224,6 +277,11 @@ class SharedGripperPolicy(CNNPolicy):
         }
 
     def _feature_modules(self) -> dict[str, nn.Module]:
+        if not self.cfg.gripper_share_features:
+            return {
+                "encoders": self.gripper_encoders,
+                "state_proj": self.gripper_state_proj,
+            }
         return {"encoders": self.encoders, "state_proj": self.state_proj}
 
     def save_shared_features(self, path: str | Path) -> None:
@@ -242,6 +300,32 @@ class SharedGripperPolicy(CNNPolicy):
             Path(path).expanduser(),
         )
 
+    def save_gripper_bc_pair(
+        self, feature_path: str | Path, head_path: str | Path
+    ) -> None:
+        """Snapshot both trained BC parts without exporting the residual branch."""
+        if (
+            Path(feature_path).expanduser().resolve()
+            == Path(head_path).expanduser().resolve()
+        ):
+            raise ValueError("Feature and head checkpoints must use different paths.")
+        parameters = [
+            p
+            for module in self._feature_modules().values()
+            for p in module.parameters()
+        ]
+        original_flags = [p.requires_grad for p in parameters]
+        try:
+            for p in parameters:
+                p.requires_grad_(False)
+            self.save_shared_features(feature_path)
+            self.save_gripper_bc(head_path)
+        finally:
+            for p, requires_grad in zip(parameters, original_flags):
+                p.requires_grad_(requires_grad)
+            if any(original_flags):
+                self._shared_feature_id = None
+
     def load_shared_features(self, path: str | Path) -> None:
         checkpoint = torch.load(
             Path(path).expanduser(), map_location="cpu", weights_only=True
@@ -254,6 +338,13 @@ class SharedGripperPolicy(CNNPolicy):
             raise ValueError("Shared feature checkpoint format/configuration mismatch.")
         for name, module in self._feature_modules().items():
             module.load_state_dict(checkpoint["state_dict"][name], strict=True)
+        if not self.cfg.gripper_share_features:
+            self.encoders.load_state_dict(
+                checkpoint["state_dict"]["encoders"], strict=True
+            )
+            self.state_proj.load_state_dict(
+                checkpoint["state_dict"]["state_proj"], strict=True
+            )
         self._shared_feature_id = checkpoint["feature_id"]
 
     def save_gripper_bc(self, path: str | Path) -> None:

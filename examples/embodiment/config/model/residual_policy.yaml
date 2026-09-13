@@ -22,6 +22,7 @@ encoder_config:
 
 gripper_mode: cnn
 gripper_architecture: shared
+gripper_share_features: true
 action_latent_dim: 64
 gripper_hidden_dim: 128
 shared_feature_checkpoint: null

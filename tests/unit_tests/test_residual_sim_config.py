@@ -39,6 +39,19 @@ def test_shared_config_requires_matching_frontend(simulation_cfg):
     validate_residual_cfg(simulation_cfg)
 
 
+def test_separate_features_option(simulation_cfg):
+    simulation_cfg.actor.model.gripper_share_features = False
+    with pytest.raises(ValueError, match="requires gripper_architecture=shared"):
+        validate_residual_cfg(simulation_cfg)
+    simulation_cfg.actor.model.gripper_architecture = "shared"
+    simulation_cfg.actor.model.gripper = {}
+    simulation_cfg.actor.model.shared_feature_checkpoint = "/test/features.pt"
+    validate_residual_cfg(simulation_cfg)
+    simulation_cfg.actor.model.gripper_share_features = "false"
+    with pytest.raises(ValueError, match="must be a boolean"):
+        validate_residual_cfg(simulation_cfg)
+
+
 @pytest.mark.parametrize(
     "key,value,match",
     [
