@@ -793,11 +793,11 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             os.path.join(target_model_save_path, f"checkpoint_rank_{self._rank}.pt"),
         )
 
-        # save replay buffer
-        buffer_save_path = os.path.join(
-            save_base_path, f"sac_components/replay_buffer/rank_{self._rank}"
-        )
-        self.replay_buffer.save_checkpoint(buffer_save_path)
+        if self.cfg.runner.get("checkpoint_replay_buffer", True):
+            buffer_save_path = os.path.join(
+                save_base_path, f"sac_components/replay_buffer/rank_{self._rank}"
+            )
+            self.replay_buffer.save_checkpoint(buffer_save_path)
 
     def load_checkpoint(self, load_base_path):
         # load model
@@ -835,8 +835,8 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             full_state_dict=True,
         )
 
-        # load replay buffer
-        buffer_load_path = os.path.join(
-            load_base_path, f"sac_components/replay_buffer/rank_{self._rank}"
-        )
-        self.replay_buffer.load_checkpoint(buffer_load_path)
+        if self.cfg.runner.get("checkpoint_replay_buffer", True):
+            buffer_load_path = os.path.join(
+                load_base_path, f"sac_components/replay_buffer/rank_{self._rank}"
+            )
+            self.replay_buffer.load_checkpoint(buffer_load_path)

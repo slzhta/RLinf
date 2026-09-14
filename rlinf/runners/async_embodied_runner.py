@@ -135,6 +135,8 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
     def run(self):
         start_step = self.global_step
         start_time = time.time()
+        online_save_interval = int(self.cfg.runner.get("save_interval_online_steps", 0))
+        last_saved_online_steps = 0
         self.update_rollout_weights(no_wait=self.sync_weight_no_wait)
 
         env_handle: Handle = self.env.interact(
@@ -186,7 +188,25 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
                         1.0,
                         run_time_exceeded=False,
                     )
+                    if online_save_interval > 0:
+                        if len(actor_result) != 1:
+                            raise ValueError(
+                                "Online-step checkpointing requires one actor rank."
+                            )
+                        online_steps = int(
+                            training_metrics["train/replay_buffer/total_samples"]
+                        )
+                        save_model = (
+                            online_steps - last_saved_online_steps
+                            >= online_save_interval
+                        )
                     if save_model:
+                        if online_save_interval > 0:
+                            self.logger.info(
+                                f"Checkpoint global_step_{self.global_step}: "
+                                f"online_env_steps={online_steps}"
+                            )
+                            last_saved_online_steps = online_steps
                         self._save_checkpoint()
                     eval_metrics = {}
                     if run_val:

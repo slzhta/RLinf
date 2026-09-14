@@ -1,6 +1,7 @@
 """Exercise the actual CNN distribution methods without a backbone or simulator."""
 
 import ast
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ def policy_type():
         "_hybrid_action_statistics",
         "_generate_actions",
         "default_forward",
+        "sac_forward",
     }
     methods = [
         n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names
@@ -123,6 +125,67 @@ class ContinuousActionTests(unittest.TestCase):
         action, _ = self.check_parity(policy, "eval")
         torch.testing.assert_close(action[:, :5], torch.tanh(mean[:, :5]))
         self.assertEqual(float(action[0, 5]), 1.0)
+
+    def test_sac_keeps_continuous_rollout_actions_and_gradients(self):
+        for scaled in (False, True):
+            policy, mean, logstd = self.make_policy(scaled=scaled)
+            with torch.no_grad():
+                mean.clamp_(-1, 1)
+            obs = {"main_images": torch.zeros(1)}
+            torch.manual_seed(23)
+            sampled, logprob, _ = policy.sac_forward(obs)
+            torch.manual_seed(23)
+            rollout, _, rollout_logprob, _, _ = policy._generate_actions(
+                None, obs["main_images"], None, False, "train"
+            )
+            torch.testing.assert_close(sampled, rollout)
+            torch.testing.assert_close(logprob, rollout_logprob, atol=1e-5, rtol=1e-5)
+            (sampled.sum() + 0.01 * logprob.sum()).backward()
+            for grad in (mean.grad, logstd.grad):
+                self.assertTrue(torch.isfinite(grad).all())
+                self.assertGreater(float(grad.abs().sum()), 0)
+
+    def test_sac_rejects_unsupported_binary_actions(self):
+        policy, _, _ = self.make_policy()
+        policy._binary_action_indices = (5,)
+        with self.assertRaisesRegex(NotImplementedError, "binary"):
+            policy.sac_forward({"main_images": torch.zeros(1)})
+
+    def test_q_config_can_preserve_actor_without_changing_legacy_defaults(self):
+        source = Path(__file__).resolve().parents[2] / (
+            "rlinf/models/embodiment/cnn_policy/cnn_policy.py"
+        )
+        config_cls = next(
+            node
+            for node in ast.parse(source.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.ClassDef) and node.name == "CNNConfig"
+        )
+        method = next(
+            node
+            for node in config_cls.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_update_info"
+        )
+        scope = {"os": os}
+        exec(
+            compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"),
+            scope,
+        )
+        for preserve in (False, True):
+            cfg = SimpleNamespace(
+                add_q_head=True,
+                preserve_actor_parameterization=preserve,
+                independent_std=True,
+                action_scale=None,
+                final_tanh=False,
+                backbone="resnet",
+                std_range=None,
+                model_path=str(source.parent),
+                encoder_config={"ckpt_name": source.name},
+            )
+            scope["_update_info"](cfg)
+            self.assertEqual(cfg.independent_std, preserve)
+            self.assertEqual(cfg.action_scale, None if preserve else (-1, 1))
+            self.assertEqual(cfg.std_range, None if preserve else (1e-5, 5))
 
 
 if __name__ == "__main__":

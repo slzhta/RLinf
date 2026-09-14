@@ -68,6 +68,7 @@ class CNNConfig:
     encoder_config: dict[str, Any] = field(default_factory=dict)
     add_value_head: bool = False
     add_q_head: bool = False
+    preserve_actor_parameterization: bool = False
     q_head_type: str = "default"
 
     state_latent_dim: int = 64
@@ -90,7 +91,7 @@ class CNNConfig:
         self._update_info()
 
     def _update_info(self):
-        if self.add_q_head:
+        if self.add_q_head and not self.preserve_actor_parameterization:
             self.independent_std = False
             if self.action_scale is None:
                 self.action_scale = -1, 1
@@ -495,6 +496,8 @@ class CNNPolicy(nn.Module, BasePolicy):
         return output_dict
 
     def sac_forward(self, obs, **kwargs):
+        if self._binary_action_indices:
+            raise NotImplementedError("SAC does not support binary action channels.")
         full_feature, mix_feature, action_mean, action_logstd = (
             self._actor_forward_from_processed_tensors(
                 obs["main_images"],
@@ -508,11 +511,13 @@ class CNNPolicy(nn.Module, BasePolicy):
         raw_action = probs.rsample()
 
         action_normalized = torch.tanh(raw_action)
-        action = action_normalized * self.action_scale + self.action_bias
+        scale = self.action_scale if self.action_scale is not None else 1.0
+        bias = self.action_bias if self.action_scale is not None else 0.0
+        action = action_normalized * scale + bias
 
         chunk_logprobs = probs.log_prob(raw_action)
         chunk_logprobs = chunk_logprobs - torch.log(
-            self.action_scale * (1 - action_normalized.pow(2)) + 1e-6
+            scale * (1 - action_normalized.pow(2)) + 1e-6
         )
 
         return action, chunk_logprobs, full_feature
