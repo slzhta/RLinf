@@ -12,9 +12,9 @@ use_gello: false
 no_gripper: false
 use_relative_frame: false
 keyboard_reward_wrapper: pnp_human
-main_image_key: wrist_1
+main_image_key: wrist_2
 include_states_in_obs: true
-state_keys: [ee_target_delta]
+state_keys: [arm_joint_position, tcp_pose, gripper_open_state]
 
 video_cfg:
   save_video: false

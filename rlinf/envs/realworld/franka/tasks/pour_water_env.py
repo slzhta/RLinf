@@ -42,12 +42,12 @@ class FrankaCoTrainingPourWaterConfig(FrankaCoTrainingBaseConfig):
     def __post_init__(self):
         geometry = PourWaterGeometry(**self.pour_config)
         if not self.is_dummy and self.camera_serials is not None:
-            if not self.camera_serials or any(
+            if len(self.camera_serials) != 2 or any(
                 not str(serial) or str(serial).startswith("REPLACE_")
                 for serial in self.camera_serials
             ):
                 raise ValueError(
-                    "Set the real wrist camera serial before starting hardware."
+                    "Set wrist and third-view camera serials before starting hardware."
                 )
         for name in (
             "max_contact_force",
@@ -90,8 +90,15 @@ class FrankaCoTrainingPourWaterEnv(FrankaCoTrainingBaseEnv):
     def _init_action_obs_spaces(self):
         super()._init_action_obs_spaces()
         self.action_space = gym.spaces.Box(-1, 1, (6,), dtype=np.float32)
-        self.observation_space["state"]["ee_target_delta"] = gym.spaces.Box(
-            -np.inf, np.inf, (6,), dtype=np.float32
+        state_space = self.observation_space["state"]
+        self.observation_space["state"] = gym.spaces.Dict(
+            {
+                "arm_joint_position": state_space["arm_joint_position"],
+                "tcp_pose": state_space["tcp_pose"],
+                "gripper_open_state": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+            }
         )
         self._base_observation_space = copy.deepcopy(self.observation_space)
 
@@ -99,9 +106,14 @@ class FrankaCoTrainingPourWaterEnv(FrankaCoTrainingBaseEnv):
         observation = super()._get_observation()
         if self.config.is_dummy:
             observation["state"]["tcp_pose"] = self._franka_state.tcp_pose.copy()
-        observation["state"]["ee_target_delta"] = self.geometry.relative_state(
-            pose_matrix(self._franka_state.tcp_pose)
-        )
+        state = observation["state"]
+        observation["state"] = {
+            "arm_joint_position": np.asarray(
+                state["arm_joint_position"], dtype=np.float32
+            ),
+            "tcp_pose": np.asarray(state["tcp_pose"], dtype=np.float32),
+            "gripper_open_state": np.asarray([-1.0], dtype=np.float32),
+        }
         return observation
 
     def _gripper_action(self, *args, **kwargs):

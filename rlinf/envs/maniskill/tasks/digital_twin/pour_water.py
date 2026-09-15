@@ -279,24 +279,15 @@ class PourWaterDigitalTwinEnv(RectangularTrayMixin, DigitalTwinBaseEnv):
         return self.compute_dense_reward(obs, action, info)
 
     def _build_extracted_obs(self, raw_obs):
-        sensors = raw_obs.get("sensor_data", {})
-        images = raw_obs.get("image", {})
-        wrist = images.get("hand_camera", sensors.get("hand_camera"))
-        if wrist is None:
+        observation = super()._build_extracted_obs(raw_obs)
+        if "extra_view_images" not in observation:
             raise ValueError("Wrist RGB is missing; use obs_mode=rgb+segmentation.")
-        matrices = (
-            self.agent.ee_pose_at_robot_base.to_transformation_matrix()
-            .detach()
-            .cpu()
-            .numpy()
+        # The mounted tool has no gripper action; keep the PnP closed-state slot.
+        observation["states"] = torch.cat(
+            [observation["states"], -torch.ones_like(observation["states"][:, :1])],
+            dim=1,
         )
-        return {
-            "main_images": self._pad_and_resize_images(wrist["rgb"].to(torch.uint8)),
-            "states": torch.as_tensor(
-                self.geometry.relative_state(matrices), device=self.device
-            ),
-            "task_descriptions": self.get_language_instruction(),
-        }
+        return observation
 
     def reset(self, seed=None, options=None):
         obs, info = super().reset(seed=seed, options=options)

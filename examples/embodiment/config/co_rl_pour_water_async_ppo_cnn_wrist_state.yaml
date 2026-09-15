@@ -136,7 +136,7 @@ env:
         video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/real
       override_cfg:
         pour_config: ${pour_task}
-        camera_serials: ["141722075170"]
+        camera_serials: ["141722075170", "REPLACE_THIRD_VIEW_CAMERA"]
   eval:
     total_num_envs: 8
     num_workers: 1
@@ -179,10 +179,10 @@ actor:
     add_value_head: true
     add_q_head: false
     use_state: true
-    state_dim: 6
+    state_dim: 14
     action_dim: 6
     num_action_chunks: 1
-    image_num: 1
+    image_num: 2
     initial_logstd: -1.0
     logstd_range: [-4.0, -1.0]
     binary_action_indices: []
