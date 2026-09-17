@@ -41,7 +41,7 @@ runner:
   logger:
     log_path: ${oc.env:RLINF_LOG_PATH,./results}
     project_name: rlinf
-    experiment_name: real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state
+    experiment_name: real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state_dense
     logger_backends: [tensorboard]
   max_epochs: 10000
   max_steps: 10000
@@ -69,12 +69,12 @@ algorithm:
   critic_subsample_size: 2
   critic_actor_ratio: 4
   bootstrap_type: standard
-  gamma: 0.98
+  gamma: 0.99
   tau: 0.005
   target_update_freq: 1
   entropy_tuning:
     alpha_type: softplus
-    initial_alpha: 0.002
+    initial_alpha: 0.01
     target_entropy: -3
     optim:
       lr: 3.0e-4
@@ -82,17 +82,16 @@ algorithm:
       clip_grad: 10.0
   replay_buffer:
     enable_cache: true
-    cache_size: 100
-    sample_window_size: 100
+    cache_size: 200
+    sample_window_size: 200
     min_buffer_size: 2
     auto_save: false
-    enable_preload: false
   demo_buffer:
     enable_cache: true
-    cache_size: 73
-    sample_window_size: 73
+    cache_size: 20
+    sample_window_size: 20
     min_buffer_size: 20
-    load_path: /home/ubuntu/shiliangzhi/co-training/datasets/peg_policyreal23_sim50_rlpd_sparse_20260915
+    load_path: /home/ubuntu/shiliangzhi/co-training/datasets/peg_real20_rlpd_dense005_20260914
     auto_save: false
   sampling_params:
     do_sample: true
@@ -107,8 +106,9 @@ algorithm:
     min_length: 1
 
 peg_task:
-  dense_reward_scale: 0.0
-  target_ee_pose: [0.62562709, 0.09669082, -0.00323407, 3.13323999, 0.01792734, -0.02263251]
+  dense_reward_type: position_gaussian
+  dense_reward_scale: 0.005
+  target_ee_pose: [0.6255128184, 0.098170464, -0.0024262427, 3.1035002035, -0.0100337488, -0.034846719]
   workspace_xy: 0.15
   workspace_above: 0.15
   workspace_below: 0.025
@@ -120,7 +120,7 @@ env:
     total_num_envs: 1
     num_workers: 1
     max_steps_per_rollout_epoch: 120
-    max_episode_steps: 120
+    max_episode_steps: 240
     ignore_terminations: false
     video_cfg:
       save_video: true
@@ -129,6 +129,7 @@ env:
       record_rollout_interval: 1
       video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/real
     override_cfg:
+      max_num_steps: 240
       peg_config: ${peg_task}
       camera_serials: ["141722075170"]
   eval:
@@ -175,8 +176,8 @@ actor:
     action_dim: 6
     num_action_chunks: 1
     image_num: 1
-    initial_logstd: 0.0
-    logstd_range: [-4.0, 2.0]
+    initial_logstd: -1.0
+    logstd_range: [-4.0, 1.0]
     binary_action_indices: []
     binary_action_temperature: 1.0
     action_std_scale: [1, 1, 1, 1, 1, 1]
@@ -185,11 +186,11 @@ actor:
       dropout: 0.0
       freeze_backbone: false
   optim:
-    lr: 3.0e-4
+    lr: 5.0e-6
     lr_scheduler: torch_constant
     clip_grad: 10.0
   critic_optim:
-    lr: 3.0e-4
+    lr: 2.0e-5
     lr_scheduler: torch_constant
     clip_grad: 10.0
   fsdp_config:

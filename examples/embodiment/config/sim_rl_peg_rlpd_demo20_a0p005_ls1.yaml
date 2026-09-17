@@ -1,6 +1,6 @@
 defaults:
-  - env/realworld_peg_insertion_co_rl@env.train
-  - env/realworld_peg_insertion_co_rl@env.eval
+  - env/maniskill_peg_insertion_co_rl@env.train
+  - env/maniskill_peg_insertion_co_rl@env.eval
   - model/cnn_policy@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -14,34 +14,16 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config/
 
 cluster:
-  num_nodes: 2
+  num_nodes: 1
   component_placement:
-    actor:
-      node_group: gpu
-      placement: 0
-    env:
-      node_group: real
-      placement: 0
-    rollout:
-      node_group: gpu
-      placement: 0
-  node_groups:
-    - label: real
-      node_ranks: 0
-      hardware:
-        type: Franka
-        configs:
-          - robot_ip: 192.168.1.2
-            node_rank: 0
-    - label: gpu
-      node_ranks: 1
+    actor,env,rollout: "0"
 
 runner:
   task_type: embodied
   logger:
     log_path: ${oc.env:RLINF_LOG_PATH,./results}
     project_name: rlinf
-    experiment_name: real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state
+    experiment_name: sim_rl_peg_rlpd_demo20_a0p005_ls1
     logger_backends: [tensorboard]
   max_epochs: 10000
   max_steps: 10000
@@ -52,7 +34,7 @@ runner:
   checkpoint_replay_buffer: false
   weight_sync_interval: 4
   resume_dir: null
-  ckpt_path: /home/ubuntu/shiliangzhi/co-training/pretrained-model/peg_sim500_bc_step10000_rlpd_q10.pt
+  ckpt_path: /home/shiliangzhi/work-space/co-training/codex-test/peg-rlpd-20260914/artifacts/peg_sim500_bc_step10000_rlpd_q10.pt
 
 algorithm:
   sim_real_rl_co_training: false
@@ -74,7 +56,7 @@ algorithm:
   target_update_freq: 1
   entropy_tuning:
     alpha_type: softplus
-    initial_alpha: 0.002
+    initial_alpha: 0.005
     target_entropy: -3
     optim:
       lr: 3.0e-4
@@ -82,17 +64,16 @@ algorithm:
       clip_grad: 10.0
   replay_buffer:
     enable_cache: true
-    cache_size: 100
-    sample_window_size: 100
+    cache_size: 200
+    sample_window_size: 200
     min_buffer_size: 2
     auto_save: false
-    enable_preload: false
   demo_buffer:
     enable_cache: true
-    cache_size: 73
-    sample_window_size: 73
+    cache_size: 20
+    sample_window_size: 20
     min_buffer_size: 20
-    load_path: /home/ubuntu/shiliangzhi/co-training/datasets/peg_policyreal23_sim50_rlpd_sparse_20260915
+    load_path: /home/shiliangzhi/work-space/co-training/codex-test/peg-rlpd-sim-20260915/peg_sim20_sparse_seed20260915
     auto_save: false
   sampling_params:
     do_sample: true
@@ -108,7 +89,7 @@ algorithm:
 
 peg_task:
   dense_reward_scale: 0.0
-  target_ee_pose: [0.62562709, 0.09669082, -0.00323407, 3.13323999, 0.01792734, -0.02263251]
+  target_ee_pose: [0.6277788863, 0.0981798968, -0.0021730941, 3.096563688, 0.0118820494, -0.0119057291]
   workspace_xy: 0.15
   workspace_above: 0.15
   workspace_below: 0.025
@@ -122,21 +103,34 @@ env:
     max_steps_per_rollout_epoch: 120
     max_episode_steps: 120
     ignore_terminations: false
+    init_params:
+      peg_config: ${peg_task}
+      sim_config:
+        gpu_memory_config:
+          collision_stack_size: 16777216
+        scene_config:
+          contact_offset: 0.0001
+          rest_offset: 0.0
     video_cfg:
       save_video: true
       info_on_video: true
       fps: 10
       record_rollout_interval: 1
-      video_base_dir: runtime_env:RLINF_LOG_PATH/${runner.logger.experiment_name}/video/train/real
-    override_cfg:
-      peg_config: ${peg_task}
-      camera_serials: ["141722075170"]
+      video_base_dir: ${runner.logger.log_path}/video/train
   eval:
     total_num_envs: 1
     num_workers: 1
+    init_params:
+      peg_config: ${peg_task}
+      sim_config:
+        gpu_memory_config:
+          collision_stack_size: 16777216
+        scene_config:
+          contact_offset: 0.0001
+          rest_offset: 0.0
     video_cfg:
       save_video: false
-    override_cfg: ${env.train.override_cfg}
+      video_base_dir: ${runner.logger.log_path}/video/eval
 
 rollout:
   group_name: RolloutGroup
@@ -147,7 +141,7 @@ rollout:
   collect_transitions: true
   collect_prev_infos: false
   model:
-    model_path: /home/ubuntu/shiliangzhi/co-training/pretrained-model
+    model_path: /home/shiliangzhi/work-space/co-training/pretrained-model
     precision: ${actor.model.precision}
     num_q_heads: 10
   enable_torch_compile: true
@@ -164,7 +158,7 @@ actor:
   enable_offload: false
   enable_drq: false
   model:
-    model_path: /home/ubuntu/shiliangzhi/co-training/pretrained-model
+    model_path: /home/shiliangzhi/work-space/co-training/pretrained-model
     add_value_head: false
     add_q_head: true
     preserve_actor_parameterization: true
@@ -175,7 +169,7 @@ actor:
     action_dim: 6
     num_action_chunks: 1
     image_num: 1
-    initial_logstd: 0.0
+    initial_logstd: 1.0
     logstd_range: [-4.0, 2.0]
     binary_action_indices: []
     binary_action_temperature: 1.0

@@ -1,0 +1,18 @@
+defaults:
+  - real_eval_pick_and_place_common
+  - _self_
+
+runner:
+  ckpt_path: ~/shiliangzhi/co-training/pretrained-model/pnp_clean_sim500_real250_bc_step3000.pt
+  logger:
+    experiment_name: real_eval_pick_and_place_cnn_dual_state
+
+rollout:
+  residual_base_inference: false
+
+actor:
+  model:
+    model_path: /home/ubuntu/shiliangzhi/co-training/pretrained-model
+
+evaluation:
+  training_config: co_rl_pick_and_place_clean_bc_n32_ue2

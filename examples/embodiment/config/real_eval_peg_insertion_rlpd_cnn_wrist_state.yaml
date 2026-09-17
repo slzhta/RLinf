@@ -1,0 +1,46 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+runner:
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: /home/ubuntu/shiliangzhi/co-training/RLinf/results/real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state/20260915-214911/real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state/checkpoints/global_step_2770/actor/model_state_dict/full_weights.pt
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH}/real_eval_peg_insertion_rlpd_cnn_wrist_state/${oc.env:RLINF_EVAL_RUN_ID}
+    experiment_name: real_eval_peg_insertion_rlpd_cnn_wrist_state
+
+algorithm:
+  sim_real_rl_co_training: false
+
+env:
+  train:
+    total_num_envs: 1
+    auto_reset: false
+    ignore_terminations: false
+    max_episode_steps: ${evaluation.episode_length}
+    max_steps_per_rollout_epoch: ${evaluation.episode_length}
+    video_cfg:
+      save_video: true
+      record_rollout_interval: 1
+      video_base_dir: runtime_env:RLINF_LOG_PATH/${evaluation.run_relative_dir}/video/real
+  eval: ${env.train}
+
+actor:
+  initial_checkpoint_exclude_keys: []
+
+rollout:
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+evaluation:
+  training_config: real_rl_peg_insertion_bc10000_rlpd_cnn_wrist_state
+  num_episodes: 40
+  episode_length: 240
+  stop_at_target_z_distance: 0.01
+  policy_mode: deterministic
+  check_only: false
+  run_relative_dir: ${runner.logger.experiment_name}/${oc.env:RLINF_EVAL_RUN_ID}

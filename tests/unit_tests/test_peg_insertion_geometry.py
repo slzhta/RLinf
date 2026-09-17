@@ -74,6 +74,39 @@ class PegSuccessTests(unittest.TestCase):
 
 
 class PegRewardScaleTests(unittest.TestCase):
+    def test_position_gaussian_matches_world_distance(self):
+        geometry = PegInsertionGeometry(
+            dense_reward_type="position_gaussian", dense_reward_scale=0.005
+        )
+        poses = np.repeat(geometry.target[None], 4, axis=0)
+        offsets = np.array(
+            [[0, 0, 0], [0.03, 0.04, 0], [0, 0, 0.1], [0, 0, 0.02]]
+        )
+        poses[:, :3, 3] += offsets
+        actual = geometry.metrics(poses)
+        np.testing.assert_allclose(
+            actual["dense_reward"], 0.005 * np.exp(-500 * (offsets**2).sum(axis=1))
+        )
+        legacy = PegInsertionGeometry(dense_reward_scale=0.005).metrics(poses)
+        for key in ("xy_error", "z_error", "angle_error", "in_target"):
+            np.testing.assert_array_equal(actual[key], legacy[key])
+        self.assertAlmostEqual(
+            geometry.metrics(poses[1])["dense_reward"], actual["dense_reward"][1]
+        )
+
+    def test_default_reward_formula_unchanged(self):
+        geometry = PegInsertionGeometry()
+        metrics = geometry.metrics(geometry.reset_pose(np.random.default_rng(42)))
+        expected = 0.05 * np.exp(
+            -metrics["xy_error"] / 0.01 - metrics["angle_error"] / 0.1
+        )
+        expected *= (1 + 2 * np.exp(-metrics["z_error"] / 0.05)) / 3
+        self.assertAlmostEqual(metrics["dense_reward"], expected)
+
+    def test_invalid_reward_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            PegInsertionGeometry(dense_reward_type="typo")
+
     def test_zero_scale_preserves_success_geometry(self):
         dense = PegInsertionGeometry()
         sparse = PegInsertionGeometry(dense_reward_scale=0.0)

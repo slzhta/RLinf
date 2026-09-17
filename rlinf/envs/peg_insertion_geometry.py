@@ -54,8 +54,11 @@ class PegInsertionGeometry:
     success_angle: float = np.deg2rad(5.0)
     success_hold_steps: int = 3
     dense_reward_scale: float = 0.05
+    dense_reward_type: str = "alignment"
 
     def __post_init__(self):
+        if self.dense_reward_type not in ("alignment", "position_gaussian"):
+            raise ValueError(f"Unknown dense_reward_type: {self.dense_reward_type}")
         values = np.asarray(self.target_ee_pose, dtype=float)
         if values.shape != (6,) or not np.isfinite(values).all():
             raise ValueError(
@@ -178,8 +181,11 @@ class PegInsertionGeometry:
         xy = np.linalg.norm(delta[..., :2], axis=-1)
         z = np.abs(delta[..., 2])
         angle = np.linalg.norm(self.relative_state(current)[..., 3:], axis=-1)
-        aligned = np.exp(-xy / 0.01 - angle / 0.10)
-        dense = self.dense_reward_scale * aligned * (1 + 2 * np.exp(-z / 0.05)) / 3
+        if self.dense_reward_type == "position_gaussian":
+            dense = self.dense_reward_scale * np.exp(-500 * (xy**2 + z**2))
+        else:
+            aligned = np.exp(-xy / 0.01 - angle / 0.10)
+            dense = self.dense_reward_scale * aligned * (1 + 2 * np.exp(-z / 0.05)) / 3
         candidate = (
             (xy <= self.success_xy)
             & (z <= self.success_z)

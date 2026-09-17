@@ -22,7 +22,9 @@ export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 log_root="${RLINF_LOG_PATH:-${REPO_DIR}/results}"
-log_dir="${log_root}/${CONFIG_NAME}/$(date +'%Y%m%d-%H%M%S')"
+run_timestamp="$(date +'%Y%m%d-%H%M%S')"
+log_dir="${log_root}/${CONFIG_NAME}/${run_timestamp}"
+video_root="runtime_env:RLINF_LOG_PATH/${CONFIG_NAME}/${run_timestamp}/video/train"
 mkdir -p "${log_dir}"
 
 cmd=(
@@ -30,6 +32,8 @@ cmd=(
     --config-path "${SCRIPT_DIR}/config"
     --config-name "${CONFIG_NAME}"
     "runner.logger.log_path=${log_dir}"
+    "env.train.video_cfg.video_base_dir=${video_root}/sim"
+    "env.train.co_training_env_cfg.video_cfg.video_base_dir=${video_root}/real"
     "$@"
 )
 printf 'Command:'

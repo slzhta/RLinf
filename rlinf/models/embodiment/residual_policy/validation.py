@@ -219,7 +219,15 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         )
     co_training = cfg.algorithm.get("sim_real_rl_co_training", False)
     simulation_only = not co_training and cfg.env.train.env_type == "maniskill"
-    expected_nodes = 1 if simulation_only else 3
+    real_only = not co_training and cfg.env.train.env_type == "realworld"
+    standalone_eval = (
+        cfg.runner.only_eval
+        and real_only
+        and cfg.get("evaluation", {}).get("num_episodes", 0) > 0
+    )
+    if not (co_training or simulation_only or real_only):
+        raise ValueError("Residual requires ManiSkill or realworld environments.")
+    expected_nodes = 3 if co_training else 1 if simulation_only else 2
     if cfg.cluster.num_nodes != expected_nodes or cfg.rollout.pipeline_stage_num != 1:
         raise ValueError(
             f"Rollout-side residual requires {expected_nodes} nodes and one stage."
@@ -228,9 +236,14 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
         raise ValueError(
             "Rollout-side residual currently requires bootstrap_type=none."
         )
-    if cfg.runner.only_eval or cfg.runner.val_check_interval > 0:
+    if cfg.runner.val_check_interval > 0:
         raise ValueError(
-            "Rollout-side residual currently supports training without evaluation."
+            "Residual training must run without evaluation; periodic eval is disabled."
+        )
+    if cfg.runner.only_eval and not standalone_eval:
+        raise ValueError(
+            "Use standalone real-world evaluation; other residual modes run "
+            "without evaluation."
         )
     if cfg.rollout.get("collect_transitions", False) or cfg.rollout.enable_offload:
         raise ValueError(
@@ -281,13 +294,12 @@ def _validate_rollout_contract(cfg: DictConfig) -> None:
             or real.override_cfg.peg_config.get("dense_reward_scale", 0.1) != 0.0
         ):
             raise ValueError("Peg requires its wrist environment and sparse rewards.")
-        if (
-            not real.include_states_in_obs
-            or not real.auto_reset
-            or real.ignore_terminations
-        ):
+        if not real.include_states_in_obs or real.ignore_terminations:
+            raise ValueError("Real residual requires states and terminations.")
+        if real.auto_reset != (not standalone_eval):
             raise ValueError(
-                "Real residual requires states, auto reset, and terminations."
+                "Real residual requires auto_reset=false for standalone eval "
+                "and auto_reset=true for training."
             )
         if domain.get("residual") or real.get("residual"):
             raise ValueError(

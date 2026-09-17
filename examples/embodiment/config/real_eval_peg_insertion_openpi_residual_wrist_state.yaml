@@ -1,0 +1,45 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+runner:
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH}/real_eval_peg_insertion_openpi_residual_wrist_state/${oc.env:RLINF_EVAL_RUN_ID}
+    experiment_name: real_eval_peg_insertion_openpi_residual_wrist_state
+
+algorithm:
+  sim_real_rl_co_training: false
+
+env:
+  train:
+    auto_reset: false
+    ignore_terminations: false
+    total_num_envs: 1
+    video_cfg:
+      save_video: true
+      record_rollout_interval: 1
+      video_base_dir: runtime_env:RLINF_LOG_PATH/${evaluation.run_relative_dir}/video/real
+  eval: ${env.train}
+
+actor:
+  initial_checkpoint_exclude_keys: []
+
+rollout:
+  residual_base_inference: true
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+evaluation:
+  training_config: real_rl_peg_insertion_openpi_residual_wrist_state_t240_ue4
+  num_episodes: 40
+  policy_mode: deterministic
+  allow_initial_residual: true
+  action_timeout_seconds: 120
+  check_only: false
+  run_relative_dir: ${runner.logger.experiment_name}/${oc.env:RLINF_EVAL_RUN_ID}

@@ -1,0 +1,13 @@
+defaults:
+  - co_rl_pick_and_place_openpi_residual_shared_t1_n32_ue4
+  - _self_
+
+runner:
+  logger:
+    experiment_name: co_rl_pick_and_place_openpi_residual_shared_t1_n16_ue4
+
+env:
+  train:
+    total_num_envs: 16
+  eval:
+    total_num_envs: 16

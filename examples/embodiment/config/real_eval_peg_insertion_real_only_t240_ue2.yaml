@@ -1,0 +1,57 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+runner:
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: /home/ubuntu/shiliangzhi/co-training/RLinf/results/real_rl_peg_insertion_bc10000_cnn_wrist_state_t240_ue2/20260912-155931/real_rl_peg_insertion_bc10000_cnn_wrist_state_t240_ue2/checkpoints/global_step_20/actor/model_state_dict/full_weights.pt
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH}/real_eval_peg_insertion_real_only_t240_ue2/${oc.env:RLINF_EVAL_RUN_ID}
+    experiment_name: real_eval_peg_insertion_real_only_t240_ue2
+
+algorithm:
+  sim_real_rl_co_training: false
+
+peg_task:
+  dense_reward_scale: 0.0
+  target_ee_pose: [0.6328213087, 0.0983276043, -0.0022764546, 3.0962472683, -0.0200927171, -0.0008140234]
+  workspace_xy: 0.15
+  workspace_above: 0.15
+  workspace_below: 0.025
+  rotation_limits: [0.01, 0.01, 0.5]
+
+env:
+  train:
+    auto_reset: false
+    ignore_terminations: false
+    total_num_envs: 1
+    max_episode_steps: 120
+    main_image_key: wrist_1
+    include_states_in_obs: true
+    state_keys: [ee_target_delta]
+    override_cfg:
+      peg_config: ${peg_task}
+      camera_serials: ["141722075170"]
+    video_cfg:
+      save_video: true
+      record_rollout_interval: 1
+      video_base_dir: runtime_env:RLINF_LOG_PATH/${evaluation.run_relative_dir}/video/real
+  eval: ${env.train}
+
+actor:
+  initial_checkpoint_exclude_keys: []
+
+rollout:
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+evaluation:
+  training_config: real_rl_peg_insertion_bc10000_cnn_wrist_state_t240_ue2
+  num_episodes: 40
+  policy_mode: deterministic
+  check_only: false
+  run_relative_dir: ${runner.logger.experiment_name}/${oc.env:RLINF_EVAL_RUN_ID}

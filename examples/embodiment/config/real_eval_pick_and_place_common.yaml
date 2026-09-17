@@ -1,0 +1,86 @@
+defaults:
+  - env/realworld_pick_and_place@pnp_eval_env
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    actor:
+      node_group: sim
+      placement: 0
+    rollout:
+      node_group: sim
+      placement: 0
+    env:
+      node_group: real
+      placement: 0
+  node_groups:
+    - label: real
+      node_ranks: 0
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: 192.168.1.2
+            node_rank: 0
+    - label: sim
+      node_ranks: 1
+
+runner:
+  only_eval: true
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+  logger:
+    log_path: ${oc.env:RLINF_LOG_PATH}/${evaluation.run_relative_dir}
+
+algorithm:
+  sim_real_rl_co_training: false
+
+pnp_eval_env:
+  auto_reset: false
+  ignore_terminations: false
+  total_num_envs: 1
+  num_workers: 1
+  max_episode_steps: ${evaluation.episode_length}
+  max_steps_per_rollout_epoch: ${evaluation.episode_length}
+  include_states_in_obs: true
+  state_keys: [arm_joint_position, tcp_pose, gripper_open_state]
+  override_cfg:
+    camera_serials: ["141722075170", "233622071355"]
+  video_cfg:
+    save_video: true
+    info_on_video: true
+    include_extra_views: true
+    record_rollout_interval: 1
+    fps: 10
+    video_base_dir: runtime_env:RLINF_LOG_PATH/${evaluation.run_relative_dir}/video/real
+
+env:
+  train: ${pnp_eval_env}
+  eval: ${pnp_eval_env}
+
+actor:
+  initial_checkpoint_exclude_keys: []
+  model:
+    model_path: ~/shiliangzhi/co-training/pretrained-model
+
+rollout:
+  model:
+    model_path: ${actor.model.model_path}
+  enable_torch_compile: false
+  enable_cuda_graph: false
+
+evaluation:
+  num_episodes: 40
+  episode_length: 120
+  policy_mode: deterministic
+  allow_initial_residual: false
+  action_timeout_seconds: 120
+  check_only: false
+  run_relative_dir: ${runner.logger.experiment_name}/${oc.env:RLINF_EVAL_RUN_ID}

@@ -1,0 +1,14 @@
+defaults:
+  - real_eval_pick_and_place_common
+  - _self_
+
+runner:
+  logger:
+    experiment_name: real_eval_pick_and_place_openpi_residual_shared
+
+rollout:
+  residual_base_inference: true
+
+evaluation:
+  training_config: co_rl_pick_and_place_openpi_residual_shared_t1_n16_ue4
+  allow_initial_residual: true
