@@ -1,0 +1,58 @@
+defaults:
+  - env/realworld_pour_water_co_rl@env.eval
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+seed: 1234
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: franka
+      placement: 0
+  node_groups:
+    - label: franka
+      node_ranks: 0
+      hardware:
+        type: Franka
+        configs:
+          - robot_ip: 192.168.1.2
+            node_rank: 0
+
+runner:
+  num_data_episodes: 2
+  logger:
+    log_path: null
+
+pour_task:
+  target_ee_pose: [0.49, 0.12448609, 0.18, 3.14159265, -0.35, 0.0]
+  action_scale: [0.01, 0.05]
+  workspace_min: [-0.15, -0.15, -0.10]
+  workspace_max: [0.15, 0.15, 0.15]
+  rotation_limits: [0.35, 1.15, 0.5]
+
+env:
+  group_name: PourCollection
+  eval:
+    total_num_envs: 1
+    num_workers: 1
+    auto_reset: false
+    ignore_terminations: false
+    use_spacemouse: true
+    spacemouse_gripper_enabled: false
+    no_gripper: false
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    override_cfg:
+      pour_config: ${pour_task}
+      max_num_steps: ${env.eval.max_episode_steps}
+      camera_serials: ["141722075170", "233622071355"]
+      enable_camera_player: true
+      output_image_size: 224

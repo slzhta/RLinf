@@ -99,7 +99,12 @@ class RealWorldEnv(gym.Env):
         no_gripper = self.cfg.get("no_gripper", True)
         gripper_enabled = not no_gripper
         if not env.config.is_dummy and use_spacemouse:
-            env = SpacemouseIntervention(env, gripper_enabled=gripper_enabled)
+            env = SpacemouseIntervention(
+                env,
+                gripper_enabled=self.cfg.get(
+                    "spacemouse_gripper_enabled", gripper_enabled
+                ),
+            )
         if not env.config.is_dummy and use_gello:
             gello_port = self.cfg.get("gello_port", None)
             if gello_port is None:
